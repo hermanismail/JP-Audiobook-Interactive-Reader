@@ -1,78 +1,119 @@
-# JP Audiobook Player — Android shell (Phase 4)
+# SHAMA — a Japanese audiobook reader for Android
 
-## Important: this has not been compiled
+<p align="center">
+  <img src="icon.jpg" width="120" alt="SHAMA app icon" />
+</p>
 
-Everything up through Phase 3 (Python pipeline changes, the JS in the
-browser preview) was actually run and syntax-checked in a real interpreter
-before being handed over. This Android project **could not be** — there's
-no Android SDK, Gradle, or Kotlin compiler available in the environment
-this was written in, only a bare JDK. I checked what I could (every XML
-file parses, the JS in the WebView asset is syntactically valid, the
-Kotlin file's braces/parens/brackets balance and I reviewed it carefully
-against the Android APIs it calls), but a Gradle sync in Android Studio is
-the first real compile this code will see. Please treat this phase as
-"written and reasoned through," not "tested," until you've built it.
+SHAMA plays audiobooks the way you'd actually want to read along with
+them: vertical, page-by-page Japanese text that highlights itself
+character by character in sync with the narration, gesture controls
+instead of buttons, and a book-like reading rhythm instead of a generic
+media player skin.
 
-## What's in here
+It's a personal-use Android app (not on the Play Store) built to pair
+with a separate, offline text-to-speech pipeline — see
+[The companion pipeline](#the-companion-pipeline) below.
 
-- **`app/src/main/java/.../MainActivity.kt`** — single Activity hosting a
-  `WebView`. Handles:
-  - the SAF folder picker (`ActivityResultContracts.OpenDocumentTree`),
-    with the picked folder's permission persisted so you don't have to
-    re-pick it every launch
-  - a `window.Android` JS bridge (`pickFolder`, `listChapters`,
-    `readTextFile`) for the folder listing and small text files
-    (`sync.json`, `book.json`)
-  - a virtual `https://appassets.androidplatform.net/chapter-audio/<name>`
-    URL space that streams the actual MP3 straight out of the SAF-picked
-    folder, **with HTTP Range support** — this matters because the
-    prev/next buttons work by setting `audio.currentTime` directly, and
-    Chromium's `<audio>` needs range support to seek reliably rather than
-    just play sequentially from the start
-- **`app/src/main/assets/web/index.html`** — the same vertical-text
-  player logic you already tested and approved in the Phase 3 browser
-  preview (fit-to-page font sizing, blank-during-silence, prev/next/play),
-  plus a plain chapter-list screen in front of it so picking a folder goes
-  somewhere sensible.
+<p align="center">
+  <img src="JP-Audiobook-Interactive-Reader-Mockup.png" width="360" alt="Reader screen" />
+</p>
+
+## Concept
+
+Most audiobook apps show you a scrubber and a track name. SHAMA is built
+around a different idea: the text itself *is* the interface. Each
+chapter's audio comes with a matching transcript, split into short
+timed chunks. SHAMA shows one chunk at a time, set vertically right-to-
+left the way Japanese is actually typeset, sized to fill the screen —
+and as each chunk plays, its characters recolor one by one, left to
+right, tracking the narration almost like karaoke subtitles.
+
+Everything else is designed to stay out of the way of that: tap
+anywhere to play or pause, swipe from an edge to move a chunk forward
+or back, triple-tap to step away. No toolbar full of buttons competing
+with the text for attention.
+
+## Features
+
+- **Gesture-driven reading** — tap to play/pause, triple-tap to return
+  to the library, swipe from the left edge for the next chunk / the
+  right edge for the previous one
+- **Karaoke-style highlight** — chunk text recolors character-by-
+  character in sync with playback, tuned so the sweep completes just
+  before the audio actually finishes rather than lagging behind it
+- **Whole-chapter progress bar** with a drag-to-seek marker, live
+  elapsed/total time
+- **Adjustable playback speed**, 0.25x–8.00x, with quick presets
+- **Autoplay & continuous playback** — a chapter starts the moment you
+  open it, and the next one starts itself when the current one ends
+- **Cover art, author, and book title read straight from each
+  chapter's own ID3 tag** — no separate metadata file to keep in sync
+- **Lock-screen and notification media controls**, backed by a real
+  `MediaSession` — play/pause/skip from the lock screen, a Bluetooth
+  headset, or Android Auto all reach the same playback
+- **Fully offline** — pick a folder once (Storage Access Framework, no
+  storage permission needed) and everything after that is local; no
+  account, no network calls, no ads
+
+## Screenshots
+
+| Reader screen | Design notes |
+| --- | --- |
+| ![Reader screen](JP-Audiobook-Interactive-Reader-Mockup.png) | ![Annotated design](JP-Audiobook-Interactive-Reader-Mockup_explanation.png) |
+
+The shipped UI follows this design closely: vertical text filling the
+upper frame, a chapter-wide progress bar, and a bottom bar with cover
+art, chapter/author/book title, a chapter-progress pill, and the speed
+control.
+
+## Engine & technology
+
+- **Kotlin**, single-`Activity` Android app (min SDK 26, target SDK 36)
+- **A `WebView`-hosted reader UI**, not native Android Views — the
+  vertical-writing-mode CSS, per-character pagination/highlighting, and
+  Pointer-Events-based gestures are all plain HTML/CSS/JS
+  (`app/src/main/assets/web/index.html`), talking to Kotlin through a
+  small `window.Android` JS bridge
+- **`androidx.webkit.WebViewAssetLoader`** serves chapter audio from an
+  app-private cache copy rather than streaming live from the picked
+  folder; jumping to a new position loads a fresh virtual resource
+  starting at that byte offset, since repositioning an already-loaded
+  `<audio>` element proved unreliable on-device
+- **A hand-rolled ID3v2.2/2.3/2.4 tag parser** (no external metadata
+  library) pulls the chapter title, author, book title, and embedded
+  cover image directly out of each chapter's MP3
+- **`androidx.media` `MediaSessionCompat`** behind a foreground
+  `Service`, mirroring whatever the WebView's `<audio>` element is doing
+  into the lock-screen/notification media control
+- **Storage Access Framework** (`ActivityResultContracts.OpenDocumentTree`)
+  for folder access, with the permission persisted so it isn't
+  re-prompted every launch
+- **Gradle (AGP 9.3.2)** with Kotlin's built-in compiler support (no
+  separate Kotlin Gradle plugin)
+
+## The companion pipeline
+
+SHAMA only plays audiobooks — it doesn't generate them. That's the job
+of a separate, offline desktop tool (Python/CustomTkinter, a two-venv
+setup with a dedicated TTS engine) that turns Japanese text into a
+folder of `chapter_XXX.mp3` files (each with the title/author/cover
+embedded in its own ID3 tag) plus a matching `chapter_XXX.sync.json`
+per chapter, timing out where each chunk of text starts and ends. SHAMA
+just reads whatever folder that tool produces — the two projects share
+a file format, not a codebase.
 
 ## Building it
 
-1. Open the `JPAudiobookPlayer` folder in Android Studio (File → Open).
-2. Let it sync Gradle. It's configured for **AGP 9.1.1** with Kotlin's
-   built-in compiler support (no separate Kotlin plugin needed) — this
-   requires **JDK 17** and an Android Studio release that supports AGP 9.x
-   (Otter or later; if your Studio predates that, it'll likely prompt you
-   to update the Gradle/AGP version, which should be safe to accept).
-3. There's no committed `gradlew`/`gradle-wrapper.jar` — I couldn't
-   generate a working one without network access. Android Studio should
-   offer to create the wrapper automatically on first open; if not,
-   `File → Sync Project with Gradle Files` should do it using its bundled
-   Gradle.
-4. Run on a device or emulator running Android 8.0 (API 26) or newer.
+1. Open this folder in Android Studio (File → Open). Requires **JDK 17**
+   and an Android Studio release supporting AGP 9.x.
+2. Let Gradle sync — there's no committed `gradlew`/`gradle-wrapper.jar`;
+   Android Studio generates it on first open (or via
+   *File → Sync Project with Gradle Files*).
+3. Run on a device or emulator running Android 8.0 (API 26) or newer.
 
-## Things worth specifically testing first
+## Status
 
-- **The folder picker and persistence** — pick your real output folder,
-  kill the app fully, relaunch, and confirm it remembers the folder
-  without re-prompting.
-- **Seeking** — this is the part I'm least certain about without a real
-  device to try it on. Play a chapter, jump around with Prev/Next several
-  times in a row (including jumping to a chunk far from the current one),
-  and listen for any glitching, silence, or the audio not actually moving
-  to the right spot. If seeking misbehaves, the Range-handling code in
-  `serveChapterAudio()` is the first place to look.
-- **A chapter with the 130-char hard-limit chunk** — same check as the
-  Phase 2/3 mockups, now on a real device screen size instead of my
-  360×720 approximation.
-- **Book title / cover** — only wired up if you already have a
-  `book.json` in the output folder; if not, the library screen just shows
-  "JP Audiobook Player" as a fallback title, which is expected.
-
-## Known gaps (not attempted this phase, by design)
-
-- No lock-screen / notification media controls — audio only plays while
-  the app is in the foreground.
-- No swipe gesture for paging, only the Prev/Next buttons.
-- `serveChapterAudio()` re-lists the folder on every audio request rather
-  than caching the lookup — fine at one-book scale, worth revisiting if
-  it ever feels slow.
+The first version is built and running on a real device, with the
+gesture-driven reader, autoplay/continuous playback, karaoke highlight,
+and lock-screen controls all in place. See `CLAUDE.md` for the detailed
+testing checklist and known gaps if you're picking up development.
