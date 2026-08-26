@@ -13,6 +13,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.webkit.WebViewAssetLoader
 import org.json.JSONArray
@@ -105,6 +106,22 @@ class MainActivity : ComponentActivity() {
         // rather than following the system screen timeout, since there's
         // no other user input happening while just listening/reading.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Match the system bars to the WebView's dark theme. The theme's
+        // own statusBarColor/navigationBarColor items (themes.xml) cover
+        // most OS versions; targetSdk 36 enforces edge-to-edge by default
+        // on Android 15+, where those setters become no-ops and the bars
+        // just show whatever the app draws behind them instead - since the
+        // WebView background is already dark, that lands on black too. The
+        // one thing that still matters on every version is icon color, so
+        // force light (white) icons/text for the dark background here.
+        @Suppress("DEPRECATION")
+        window.statusBarColor = android.graphics.Color.BLACK
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = android.graphics.Color.BLACK
+        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = false
+        insetsController.isAppearanceLightNavigationBars = false
 
         assetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))

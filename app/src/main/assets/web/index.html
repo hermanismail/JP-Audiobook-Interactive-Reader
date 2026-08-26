@@ -15,8 +15,9 @@
   #readerScreen { display:none; height:100%; box-sizing:border-box; flex-direction:column; padding:16px; gap:10px; touch-action:none; }
 
   #frame { flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:26px; box-sizing:border-box; }
-  #pageText { writing-mode:vertical-rl; height:100%; display:flex; justify-content:center; align-items:flex-start; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:#c9bdfa; }
-  #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; white-space:normal; }
+  #pageText { writing-mode:vertical-rl; height:100%; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:#c9bdfa; overflow-wrap:anywhere; }
+  #pageText span { transition:color 0.2s ease; }
+  #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; white-space:normal; overflow-wrap:anywhere; }
   #loadingOverlay { display:none; color:#9b93b0; font-size:14px; text-align:center; }
 
   #timeRow { display:flex; justify-content:space-between; font-size:12px; color:#c9c6cf; padding:0 2px; }
@@ -166,6 +167,8 @@
   var durationKnown = false;
   var currentSpeed = 1.0;
   var scrubbing = false;
+  var chunkSpans = [];
+  var chunkLitCount = 0;
   var PAD = 26, MAX_F = 68, ABS_MIN = 10;
 
   function humanize(base){
@@ -290,6 +293,7 @@
     loadingOverlay.style.display = 'none';
     pageText.style.display = 'flex';
     updateForTime(0);
+    audio.play().catch(function(e){ console.log('autoplay failed: ' + e); });
 
     var meta = {};
     try { meta = JSON.parse(metadataJson || '{}'); } catch(e){}
@@ -379,13 +383,78 @@
     var f = fitFontSize(chunk.text, availW, availH);
     pageText.style.opacity = '0';
     pageText.style.fontSize = f + 'px';
-    pageText.textContent = chunk.text;
+
+    // One span per character (not per textContent string) so playback
+    // progress through the chunk can be shown by recoloring characters
+    // one at a time - see updateChunkHighlight(). Array.from (not a plain
+    // for-loop over string indices) so a surrogate-pair character doesn't
+    // get split across two spans.
+    pageText.innerHTML = '';
+    chunkSpans = Array.from(chunk.text).map(function(ch){
+      var span = document.createElement('span');
+      span.textContent = ch;
+      pageText.appendChild(span);
+      return span;
+    });
+
+    // Chromium can cache pageText's wrapped-column width from before this
+    // batch of per-character spans went in and not recompute it - it then
+    // renders as one long unwrapped column overflowing past the frame
+    // instead of wrapping into a new one, until something forces a real
+    // style invalidation. A display toggle forces that reliably, and it's
+    // invisible here since it happens inside the opacity:0 window above,
+    // before the fade-in below.
+    pageText.style.display = 'none';
+    void pageText.offsetHeight;
+    pageText.style.display = '';
+
+    // The first PRELIT_COUNT characters read as already "caught up" the
+    // instant the page appears, rather than visibly waiting for playback
+    // progress to reach them - matches the natural lead-in beat of the
+    // narration for those first couple of characters.
+    chunkLitCount = Math.min(PRELIT_COUNT, chunkSpans.length);
+    for (var p = 0; p < chunkLitCount; p++) chunkSpans[p].style.color = HIGHLIGHT_COLOR;
+
     requestAnimationFrame(function(){ pageText.style.opacity = '1'; });
   }
 
   function blankPage(){
     pageText.style.opacity = '0';
-    pageText.textContent = '';
+    pageText.innerHTML = '';
+    chunkSpans = [];
+    chunkLitCount = 0;
+  }
+
+  // Recolors characters left-to-right as the chunk's own playback
+  // progresses, so "10% through this chunk" reads as "10% of its
+  // characters have turned" rather than a single continuous gradient -
+  // matches how furigana/karaoke-style highlighting is usually done. The
+  // first PRELIT_COUNT characters are lit immediately by showPage() above;
+  // progress here is mapped over the remaining characters only, and
+  // rescaled so the last character lands at COMPLETE_AT_FRACTION rather
+  // than exactly 100% - audio for a chunk tends to actually finish a beat
+  // before the chunk's own end timestamp, so waiting for true 100% often
+  // meant the last couple of characters never visibly caught up.
+  var HIGHLIGHT_COLOR = '#F6CAC0';
+  var PRELIT_COUNT = 2;
+  var COMPLETE_AT_FRACTION = 0.95;
+
+  function updateChunkHighlight(t, chunk){
+    if (!shown || chunkSpans.length === 0) return;
+    var span = chunk.end - chunk.start;
+    var frac = span > 0 ? (t - chunk.start) / span : 1;
+    frac = Math.max(0, Math.min(1, frac));
+    var adjustedFrac = Math.min(1, frac / COMPLETE_AT_FRACTION);
+    var remaining = Math.max(0, chunkSpans.length - PRELIT_COUNT);
+    var litCount = Math.min(chunkSpans.length, PRELIT_COUNT + Math.floor(adjustedFrac * remaining));
+    if (litCount === chunkLitCount) return;
+    var i;
+    if (litCount > chunkLitCount) {
+      for (i = chunkLitCount; i < litCount; i++) chunkSpans[i].style.color = HIGHLIGHT_COLOR;
+    } else {
+      for (i = litCount; i < chunkLitCount; i++) chunkSpans[i].style.color = '';
+    }
+    chunkLitCount = litCount;
   }
 
   function currentChunkIndex(t){
@@ -422,6 +491,8 @@
       }
       updateChapterPill();
     }
+
+    updateChunkHighlight(t, chunk);
   }
 
   function bufferedRangesString(){
@@ -462,6 +533,19 @@
       return;
     }
     updateForTime(t + chapterTimeOffset);
+  });
+
+  // Continuous playback: 'ended' fires once the currently loaded resource
+  // reaches its own end. Every resource we ever load - the initial full
+  // file, or a seekToTime() byte-offset fragment - always runs through to
+  // the file's real EOF (see serveAudioFromTime), so this reliably means
+  // "the chapter has actually finished," regardless of how many seeks
+  // happened along the way.
+  audio.addEventListener('ended', function(){
+    var currentIndex = allChapters.indexOf(pendingChapterBase);
+    if (currentIndex >= 0 && currentIndex + 1 < allChapters.length) {
+      openChapter(allChapters[currentIndex + 1]);
+    }
   });
 
   function togglePlayPause(){
