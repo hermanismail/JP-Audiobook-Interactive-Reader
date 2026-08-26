@@ -26,6 +26,7 @@ private const val PREFS_NAME = "jp_audiobook_player"
 private const val KEY_TREE_URI = "library_tree_uri"
 private const val VIRTUAL_HOST = "appassets.androidplatform.net"
 private const val AUDIO_OFFSET_PATH_PREFIX = "/internal-audio-offset/"
+private const val COVER_ART_PATH_PREFIX = "/internal-cover/"
 // run_audiobook.py always encodes with `-b:a 320k` (CBR, no VBR flags), so
 // this gives an accurate byte/time relationship for a rough offset seek -
 // see serveAudioFromTime().
@@ -129,6 +130,9 @@ class MainActivity : ComponentActivity() {
                 if (url.host == VIRTUAL_HOST && url.path?.startsWith(AUDIO_OFFSET_PATH_PREFIX) == true) {
                     return serveAudioFromTime(url)
                 }
+                if (url.host == VIRTUAL_HOST && url.path?.startsWith(COVER_ART_PATH_PREFIX) == true) {
+                    return serveCoverArt(url)
+                }
                 return assetLoader.shouldInterceptRequest(url)
             }
         }
@@ -228,7 +232,7 @@ class MainActivity : ComponentActivity() {
 
                 if (destFile.exists() && destFile.length() == totalBytes) {
                     Log.d(TAG, "prepareChapterAudio: using cached copy of $fileName ($totalBytes bytes)")
-                    notifyPrepareReady(baseName)
+                    notifyPrepareReady(baseName, metadataJsonFor(destFile))
                     return@Thread
                 }
 
@@ -271,7 +275,7 @@ class MainActivity : ComponentActivity() {
                     "prepareChapterAudio: copied $fileName ($copiedBytes bytes) in " +
                         "${System.currentTimeMillis() - copyStart}ms"
                 )
-                notifyPrepareReady(baseName)
+                notifyPrepareReady(baseName, metadataJsonFor(destFile))
             } catch (e: Exception) {
                 Log.e(TAG, "prepareChapterAudio failed for $baseName", e)
                 notifyPrepareFailed(baseName, e.message ?: "unknown error")
@@ -380,13 +384,212 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun notifyPrepareReady(baseName: String) {
+    private fun notifyPrepareReady(baseName: String, metadataJson: String) {
         webView.post {
             webView.evaluateJavascript(
-                "window.onAudioPrepareReady && window.onAudioPrepareReady(${JSONObject.quote(baseName)});",
+                "window.onAudioPrepareReady && window.onAudioPrepareReady(${JSONObject.quote(baseName)}, ${JSONObject.quote(metadataJson)});",
                 null
             )
         }
+    }
+
+    /**
+     * Reads TIT2/TPE1/TALB and whether an APIC (cover) frame is present from
+     * the given file's ID3v2 tag, as a JSON string for the JS side
+     * (window.onAudioPrepareReady). Parsed straight from the just-copied
+     * cache file rather than the original SAF document - it's already local
+     * and this avoids a second SAF round trip.
+     */
+    private fun metadataJsonFor(file: File): String {
+        val tag = parseId3Tag(file)
+        return JSONObject().apply {
+            put("title", tag.title ?: "")
+            put("artist", tag.artist ?: "")
+            put("album", tag.album ?: "")
+            put("hasCover", tag.coverBytes != null)
+        }.toString()
+    }
+
+    /**
+     * Serves the embedded cover image (ID3v2 APIC frame) for
+     * chapter_<baseName>.mp3 out of the internal cache copy, re-parsing the
+     * tag on each request rather than caching the decoded bytes - at
+     * ~1-2MB and once per chapter open this is cheap enough that the extra
+     * bookkeeping isn't worth it.
+     */
+    private fun serveCoverArt(url: Uri): WebResourceResponse {
+        val fileName = url.path!!.removePrefix(COVER_ART_PATH_PREFIX)
+        val file = File(internalAudioDir, fileName)
+        if (!file.exists()) return notFound()
+
+        val tag = parseId3Tag(file)
+        val coverBytes = tag.coverBytes ?: return notFound()
+        return WebResourceResponse(
+            tag.coverMime ?: "image/jpeg", null, 200, "OK", emptyMap(),
+            ByteArrayInputStream(coverBytes)
+        )
+    }
+
+    private data class Id3Tag(
+        val title: String? = null,
+        val artist: String? = null,
+        val album: String? = null,
+        val coverMime: String? = null,
+        val coverBytes: ByteArray? = null
+    )
+
+    /**
+     * Minimal manual ID3v2.2/2.3/2.4 frame reader - just enough to pull
+     * TIT2/TPE1/TPE2/TALB text and an APIC/PIC cover image, the same
+     * hand-rolled-parsing style already used by detectId3v2HeaderSize
+     * above (no bundled ID3 library). Frame *size* encoding differs by
+     * version: v2.4 sizes are synchsafe like the tag header, v2.3 sizes are
+     * plain big-endian, and v2.2 uses 3-byte IDs with 3-byte plain sizes -
+     * getting this wrong silently misaligns every frame after the first.
+     */
+    private fun parseId3Tag(file: File): Id3Tag {
+        return try {
+            FileInputStream(file).use { stream ->
+                val header = ByteArray(10)
+                if (readFully(stream, header) < 10) return Id3Tag()
+                if (header[0] != 'I'.code.toByte() || header[1] != 'D'.code.toByte() || header[2] != '3'.code.toByte()) {
+                    return Id3Tag()
+                }
+                val majorVersion = header[3].toInt()
+                val tagSize = synchsafeInt(header[6], header[7], header[8], header[9])
+                val body = ByteArray(tagSize)
+                readFully(stream, body)
+
+                var title: String? = null
+                var artist: String? = null
+                var album: String? = null
+                var coverMime: String? = null
+                var coverBytes: ByteArray? = null
+
+                var pos = 0
+                val idLen = if (majorVersion == 2) 3 else 4
+                while (pos + idLen <= body.size) {
+                    val idBytes = body.copyOfRange(pos, pos + idLen)
+                    val isValidId = idBytes.all { b ->
+                        (b >= 'A'.code.toByte() && b <= 'Z'.code.toByte()) ||
+                            (b >= '0'.code.toByte() && b <= '9'.code.toByte())
+                    }
+                    if (!isValidId) break
+                    pos += idLen
+
+                    val frameSize: Int
+                    if (majorVersion == 2) {
+                        if (pos + 3 > body.size) break
+                        frameSize = ((body[pos].toInt() and 0xFF) shl 16) or
+                            ((body[pos + 1].toInt() and 0xFF) shl 8) or
+                            (body[pos + 2].toInt() and 0xFF)
+                        pos += 3
+                    } else {
+                        if (pos + 6 > body.size) break
+                        frameSize = if (majorVersion == 4) {
+                            synchsafeInt(body[pos], body[pos + 1], body[pos + 2], body[pos + 3])
+                        } else {
+                            ((body[pos].toInt() and 0xFF) shl 24) or
+                                ((body[pos + 1].toInt() and 0xFF) shl 16) or
+                                ((body[pos + 2].toInt() and 0xFF) shl 8) or
+                                (body[pos + 3].toInt() and 0xFF)
+                        }
+                        pos += 4 + 2 // size + 2 flag bytes
+                    }
+                    if (frameSize < 0 || pos + frameSize > body.size) break
+                    val frameData = body.copyOfRange(pos, pos + frameSize)
+                    pos += frameSize
+
+                    when (val frameId = String(idBytes, Charsets.US_ASCII)) {
+                        "TIT2" -> title = decodeId3Text(frameData)
+                        "TPE1", "TPE2" -> if (artist.isNullOrEmpty()) artist = decodeId3Text(frameData)
+                        "TALB" -> album = decodeId3Text(frameData)
+                        "APIC", "PIC" -> {
+                            val parsed = decodeApicFrame(frameData, isV22 = frameId == "PIC")
+                            if (parsed != null) {
+                                coverMime = parsed.first
+                                coverBytes = parsed.second
+                            }
+                        }
+                    }
+                }
+                Id3Tag(title, artist, album, coverMime, coverBytes)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "parseId3Tag failed for ${file.name}", e)
+            Id3Tag()
+        }
+    }
+
+    private fun readFully(stream: java.io.InputStream, buffer: ByteArray): Int {
+        var total = 0
+        while (total < buffer.size) {
+            val read = stream.read(buffer, total, buffer.size - total)
+            if (read <= 0) break
+            total += read
+        }
+        return total
+    }
+
+    private fun synchsafeInt(b0: Byte, b1: Byte, b2: Byte, b3: Byte): Int {
+        return ((b0.toInt() and 0x7F) shl 21) or
+            ((b1.toInt() and 0x7F) shl 14) or
+            ((b2.toInt() and 0x7F) shl 7) or
+            (b3.toInt() and 0x7F)
+    }
+
+    // ID3 text frames are padded with trailing NUL bytes, not spaces - strip
+    // those via the Char(0) constructor rather than a raw escape literal so the
+    // literal byte never ends up embedded in this source file.
+    private val ID3_TEXT_PAD = Char(0)
+
+    private fun decodeId3Text(frameData: ByteArray): String {
+        if (frameData.isEmpty()) return ""
+        val encoding = frameData[0].toInt()
+        val textBytes = frameData.copyOfRange(1, frameData.size)
+        val raw = when (encoding) {
+            1 -> String(textBytes, Charsets.UTF_16) // UTF-16 with BOM
+            2 -> String(textBytes, Charsets.UTF_16BE)
+            3 -> String(textBytes, Charsets.UTF_8)
+            else -> String(textBytes, Charsets.ISO_8859_1)
+        }
+        return raw.trimEnd(ID3_TEXT_PAD)
+    }
+
+    /** APIC (v2.3/2.4) has a MIME string; the older PIC (v2.2) has a 3-char image format code instead. */
+    private fun decodeApicFrame(frameData: ByteArray, isV22: Boolean): Pair<String, ByteArray>? {
+        if (frameData.isEmpty()) return null
+        var pos = 0
+        pos += 1 // text encoding byte
+        val mime: String
+        if (isV22) {
+            if (pos + 3 > frameData.size) return null
+            val fmt = String(frameData, pos, 3, Charsets.US_ASCII)
+            pos += 3
+            mime = if (fmt.equals("PNG", ignoreCase = true)) "image/png" else "image/jpeg"
+        } else {
+            var nul = pos
+            while (nul < frameData.size && frameData[nul].toInt() != 0) nul++
+            if (nul >= frameData.size) return null
+            mime = String(frameData, pos, nul - pos, Charsets.US_ASCII)
+            pos = nul + 1
+        }
+        if (pos >= frameData.size) return null
+        pos += 1 // picture type byte
+
+        // Description string, null-terminated (2 bytes if the text encoding is a UTF-16 variant).
+        val encoding = frameData[0].toInt()
+        pos = if (encoding == 1 || encoding == 2) {
+            var i = pos
+            while (i + 1 < frameData.size && !(frameData[i].toInt() == 0 && frameData[i + 1].toInt() == 0)) i += 2
+            i + 2
+        } else {
+            var i = pos
+            while (i < frameData.size && frameData[i].toInt() != 0) i++
+            i + 1
+        }
+        if (pos < 0 || pos > frameData.size) return null
+        return mime to frameData.copyOfRange(pos, frameData.size)
     }
 
     private fun notifyPrepareFailed(baseName: String, reason: String) {
