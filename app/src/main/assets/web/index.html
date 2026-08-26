@@ -242,6 +242,7 @@
     audio.pause();
     readerScreen.style.display = 'none';
     libraryScreen.style.display = 'block';
+    Android.stopPlaybackSession();
   }
 
   function openChapter(base){
@@ -526,6 +527,24 @@
     }
   });
 
+  // Mirrors <audio>'s state into the native MediaSession that drives the
+  // lock-screen/notification controls (see PlaybackService.kt) - forced
+  // (bypassing the throttle) on play/pause/speed changes so those feel
+  // immediate, throttled to once per second of media time on ordinary
+  // timeupdate ticks since the system interpolates the seekbar between
+  // updates on its own using the reported speed.
+  var lastReportedSecond = -1;
+  function reportPlaybackState(force){
+    var t = (audio.currentTime || 0) + chapterTimeOffset;
+    var sec = Math.floor(t);
+    if (!force && sec === lastReportedSecond) return;
+    lastReportedSecond = sec;
+    Android.reportPlaybackState(!audio.paused, t, chapterDuration, currentSpeed);
+  }
+
+  audio.addEventListener('play', function(){ reportPlaybackState(true); });
+  audio.addEventListener('pause', function(){ reportPlaybackState(true); });
+
   audio.addEventListener('timeupdate', function(){
     var t = audio.currentTime;
     if (isNaN(t)) {
@@ -533,6 +552,7 @@
       return;
     }
     updateForTime(t + chapterTimeOffset);
+    reportPlaybackState(false);
   });
 
   // Continuous playback: 'ended' fires once the currently loaded resource
@@ -594,6 +614,16 @@
 
   function goNext(){ if (chunks.length) seekToChunk(idx + 1); }
   function goPrev(){ if (chunks.length) seekToChunk(Math.max(0, idx - 1)); }
+
+  // Entry points for transport actions arriving from outside the WebView -
+  // the lock-screen widget, the notification, Bluetooth headset buttons,
+  // Android Auto - relayed here from PlaybackService via MainActivity's
+  // TransportListener (see runJs() in MainActivity.kt).
+  window.mediaPlay = function(){ audio.play().catch(function(e){ console.log('mediaPlay failed: ' + e); }); };
+  window.mediaPause = function(){ audio.pause(); };
+  window.mediaNext = function(){ goNext(); };
+  window.mediaPrevious = function(){ goPrev(); };
+  window.mediaSeekTo = function(seconds){ seekToTime(seconds); };
 
   // --- Gestures on the text area: tap to play/pause, triple-tap to go
   // back to the library, edge-swipe to prev/next. All funneled through
@@ -674,6 +704,7 @@
     speedLabel.textContent = v.toFixed(2) + 'x';
     speedValue.textContent = v.toFixed(2) + 'x';
     speedSlider.value = v;
+    reportPlaybackState(true);
   }
 
   speedPill.addEventListener('click', function(){

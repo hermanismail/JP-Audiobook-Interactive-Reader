@@ -1,9 +1,17 @@
 package com.misao.jpaudiobookplayer
 
+import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.util.Log
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
@@ -13,6 +21,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.webkit.WebViewAssetLoader
@@ -82,6 +91,42 @@ class MainActivity : ComponentActivity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private val internalAudioDir: File by lazy { File(cacheDir, "chapter-audio").apply { mkdirs() } }
 
+    private var playbackService: PlaybackService? = null
+
+    // Lock-screen/notification transport actions (including ones that
+    // don't come from our own notification - Bluetooth headset buttons,
+    // Android Auto, Assistant) arrive here and get relayed into the
+    // WebView, which is where playback actually lives.
+    private val transportListener = object : PlaybackService.TransportListener {
+        override fun onTransportPlay() { runJs("window.mediaPlay && window.mediaPlay();") }
+        override fun onTransportPause() { runJs("window.mediaPause && window.mediaPause();") }
+        override fun onTransportNext() { runJs("window.mediaNext && window.mediaNext();") }
+        override fun onTransportPrevious() { runJs("window.mediaPrevious && window.mediaPrevious();") }
+        override fun onTransportSeekTo(positionMs: Long) {
+            runJs("window.mediaSeekTo && window.mediaSeekTo(${positionMs / 1000.0});")
+        }
+    }
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            val service = (binder as PlaybackService.LocalBinder).getService()
+            service.setTransportListener(transportListener)
+            playbackService = service
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            playbackService = null
+        }
+    }
+
+    // Foreground-service notifications are silent no-ops without this on
+    // API 33+ if never granted, but the app is still fully usable without
+    // it (just no lock-screen/notification controls) - nothing to do
+    // either way the user answers.
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
     private val folderPicker = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
@@ -123,6 +168,13 @@ class MainActivity : ComponentActivity() {
         insetsController.isAppearanceLightStatusBars = false
         insetsController.isAppearanceLightNavigationBars = false
 
+        bindService(Intent(this, PlaybackService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
         assetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .addPathHandler(
@@ -162,6 +214,16 @@ class MainActivity : ComponentActivity() {
 
         setContentView(webView)
         webView.loadUrl("https://$VIRTUAL_HOST/assets/web/index.html")
+    }
+
+    override fun onDestroy() {
+        playbackService?.setTransportListener(null)
+        unbindService(serviceConnection)
+        super.onDestroy()
+    }
+
+    private fun runJs(script: String) {
+        webView.post { webView.evaluateJavascript(script, null) }
     }
 
     private fun launchFolderPicker() {
@@ -249,7 +311,7 @@ class MainActivity : ComponentActivity() {
 
                 if (destFile.exists() && destFile.length() == totalBytes) {
                     Log.d(TAG, "prepareChapterAudio: using cached copy of $fileName ($totalBytes bytes)")
-                    notifyPrepareReady(baseName, metadataJsonFor(destFile))
+                    onChapterAudioReady(baseName, destFile)
                     return@Thread
                 }
 
@@ -292,7 +354,7 @@ class MainActivity : ComponentActivity() {
                     "prepareChapterAudio: copied $fileName ($copiedBytes bytes) in " +
                         "${System.currentTimeMillis() - copyStart}ms"
                 )
-                notifyPrepareReady(baseName, metadataJsonFor(destFile))
+                onChapterAudioReady(baseName, destFile)
             } catch (e: Exception) {
                 Log.e(TAG, "prepareChapterAudio failed for $baseName", e)
                 notifyPrepareFailed(baseName, e.message ?: "unknown error")
@@ -411,20 +473,67 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Reads TIT2/TPE1/TALB and whether an APIC (cover) frame is present from
-     * the given file's ID3v2 tag, as a JSON string for the JS side
-     * (window.onAudioPrepareReady). Parsed straight from the just-copied
-     * cache file rather than the original SAF document - it's already local
-     * and this avoids a second SAF round trip.
+     * Runs once a chapter's audio is confirmed ready (fresh copy or cache
+     * hit): reads TIT2/TPE1/TALB/APIC from the file's ID3 tag once, pushes
+     * it to the lock-screen/notification media session (native side, so a
+     * ~2MB cover image never has to cross the JS bridge as a string), then
+     * tells the WebView the chapter is ready to play. Order matters here -
+     * the media session's now-playing info is set before the service is
+     * (re)started, so the very first notification frame already has real
+     * content instead of a placeholder.
      */
-    private fun metadataJsonFor(file: File): String {
-        val tag = parseId3Tag(file)
-        return JSONObject().apply {
-            put("title", tag.title ?: "")
-            put("artist", tag.artist ?: "")
-            put("album", tag.album ?: "")
-            put("hasCover", tag.coverBytes != null)
-        }.toString()
+    private fun onChapterAudioReady(baseName: String, file: File) {
+        runOnUiThread {
+            val tag = parseId3Tag(file)
+            val cover = tag.coverBytes?.let { decodeSampledBitmap(it, maxDimension = 512) }
+            playbackService?.updateNowPlaying(
+                title = tag.title?.takeIf { it.isNotBlank() } ?: humanizeChapterName(baseName),
+                artist = tag.artist ?: "",
+                album = tag.album ?: "",
+                cover = cover
+            )
+            ContextCompat.startForegroundService(this, Intent(this, PlaybackService::class.java))
+
+            val metadataJson = JSONObject().apply {
+                put("title", tag.title ?: "")
+                put("artist", tag.artist ?: "")
+                put("album", tag.album ?: "")
+                put("hasCover", tag.coverBytes != null)
+            }.toString()
+            notifyPrepareReady(baseName, metadataJson)
+        }
+    }
+
+    private fun humanizeChapterName(baseName: String): String {
+        val m = Regex("""(\d+)$""").find(baseName)
+        return if (m != null) "Chapter " + m.groupValues[1].toInt() else baseName
+    }
+
+    /**
+     * Decodes a possibly-large embedded cover image at a reduced
+     * resolution rather than full size - MediaMetadataCompat's album art
+     * and the notification's large icon both cross a Binder IPC boundary
+     * to system processes, and a multi-megabyte full-resolution bitmap
+     * (the sample covers here are ~1200px square, decoded ARGB_8888) risks
+     * a TransactionTooLargeException. Uses BitmapFactory's inSampleSize so
+     * the oversized image is never fully decoded into memory to begin with.
+     */
+    private fun decodeSampledBitmap(bytes: ByteArray, maxDimension: Int): Bitmap? {
+        return try {
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOptions)
+            var sample = 1
+            while (boundsOptions.outWidth / (sample * 2) >= maxDimension &&
+                boundsOptions.outHeight / (sample * 2) >= maxDimension
+            ) {
+                sample *= 2
+            }
+            val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
+        } catch (e: Exception) {
+            Log.e(TAG, "decodeSampledBitmap failed", e)
+            null
+        }
     }
 
     /**
@@ -634,6 +743,22 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun prepareChapterAudio(baseName: String) {
             prepareChapterAudioAsync(baseName)
+        }
+
+        // Mirrors the WebView <audio> element's play/pause/position/speed
+        // into the MediaSession that actually drives the lock-screen and
+        // notification controls - title/artist/cover are set separately,
+        // natively, in onChapterAudioReady() above.
+        @JavascriptInterface
+        fun reportPlaybackState(isPlaying: Boolean, positionSeconds: Double, durationSeconds: Double, speed: Double) {
+            runOnUiThread {
+                playbackService?.updatePlaybackState(isPlaying, positionSeconds, durationSeconds, speed.toFloat())
+            }
+        }
+
+        @JavascriptInterface
+        fun stopPlaybackSession() {
+            runOnUiThread { playbackService?.stopSession() }
         }
     }
 }
