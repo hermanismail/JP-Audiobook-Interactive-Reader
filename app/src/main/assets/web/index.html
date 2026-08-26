@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>JP Audiobook Player</title>
+<style>
+  html, body { margin:0; height:100%; background:#0b0b0d; color:#e8e6ea; font-family: sans-serif; overflow:hidden; }
+  #libraryScreen { padding:24px; box-sizing:border-box; height:100%; overflow-y:auto; }
+  #libraryScreen h1 { font-size:18px; font-weight:500; margin:0 0 16px; }
+  #chooseFolderBtn, .chapterRow, #changeFolderBtn { display:block; width:100%; box-sizing:border-box; text-align:left; padding:14px 16px; margin-bottom:10px; border-radius:10px; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; font-size:15px; }
+  #changeFolderBtn { background:none; border:none; color:#9b93b0; font-size:13px; text-decoration:underline; width:auto; }
+  #emptyMsg { color:#9a97a0; font-size:14px; margin-bottom:16px; }
+
+  #readerScreen { display:none; height:100%; box-sizing:border-box; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:14px; }
+  #frame { width:100%; max-width:420px; height:70vh; background:#0b0b0d; border:1px solid #232127; border-radius:20px; position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center; padding:50px; box-sizing:border-box; }
+  #pageText { writing-mode:vertical-rl; height:100%; display:flex; justify-content:center; align-items:flex-start; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:#c9bdfa; }
+  #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; white-space:normal; }
+  #progressTrack { position:absolute; bottom:16px; left:50px; right:50px; height:3px; background:#2a2830; border-radius:2px; overflow:hidden; }
+  #progressBar { height:100%; width:0%; background:#AFA9EC; }
+  .controls { display:flex; align-items:center; gap:12px; }
+  .controls button { padding:10px 16px; border-radius:8px; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; font-size:14px; }
+  #meta { font-size:12px; color:#8a8790; }
+  #backBtn { background:none; border:none; color:#9b93b0; font-size:13px; text-decoration:underline; }
+  #loadingOverlay { display:none; color:#9b93b0; font-size:14px; text-align:center; }
+</style>
+</head>
+<body>
+
+<div id="libraryScreen">
+  <h1 id="libraryTitle">JP Audiobook Player</h1>
+  <div id="libraryBody"></div>
+</div>
+
+<div id="readerScreen">
+  <div id="frame">
+    <div id="pageText"></div>
+    <div id="loadingOverlay">Preparing chapter&hellip; <span id="loadingPercent">0</span>%</div>
+    <div id="measure"></div>
+    <div id="progressTrack"><div id="progressBar"></div></div>
+  </div>
+  <div class="controls">
+    <button id="prevBtn">◀ Prev</button>
+    <button id="playBtn">Play</button>
+    <button id="nextBtn">Next ▶</button>
+  </div>
+  <div id="meta"></div>
+  <button id="backBtn">◀ Back to library</button>
+  <audio id="audio"></audio>
+</div>
+
+<script>
+(function(){
+  var libraryScreen = document.getElementById('libraryScreen');
+  var libraryTitle = document.getElementById('libraryTitle');
+  var libraryBody = document.getElementById('libraryBody');
+  var readerScreen = document.getElementById('readerScreen');
+
+  var audio = document.getElementById('audio');
+  var pageText = document.getElementById('pageText');
+  var measure = document.getElementById('measure');
+  var frame = document.getElementById('frame');
+  var progressBar = document.getElementById('progressBar');
+  var meta = document.getElementById('meta');
+  var playBtn = document.getElementById('playBtn');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var backBtn = document.getElementById('backBtn');
+  var loadingOverlay = document.getElementById('loadingOverlay');
+  var loadingPercent = document.getElementById('loadingPercent');
+
+  var chunks = [];
+  var chapterTimeOffset = 0; // see seekToChunk() - added to audio.currentTime
+                              // to get real chapter-relative time, since a
+                              // jumped-to resource reports its own time
+                              // starting from 0.
+  var idx = -1;
+  var shown = false;
+  var pendingChapterBase = null;
+  var PAD = 50, MAX_F = 68, ABS_MIN = 10;
+
+  function humanize(base){
+    var m = base.match(/(\d+)$/);
+    return m ? ('Chapter ' + parseInt(m[1], 10)) : base;
+  }
+
+  function renderLibrary(){
+    var data;
+    try {
+      data = JSON.parse(Android.listChapters());
+    } catch(e){
+      libraryBody.innerHTML = '<p id="emptyMsg">Could not read the library folder.</p>';
+      return;
+    }
+
+    libraryBody.innerHTML = '';
+
+    if(!data.hasFolder){
+      libraryTitle.textContent = 'JP Audiobook Player';
+      var btn = document.createElement('button');
+      btn.id = 'chooseFolderBtn';
+      btn.textContent = 'Choose audiobook folder';
+      btn.addEventListener('click', function(){ Android.pickFolder(); });
+      libraryBody.appendChild(btn);
+      return;
+    }
+
+    libraryTitle.textContent = data.bookTitle || 'JP Audiobook Player';
+
+    if(data.chapters.length === 0){
+      var msg = document.createElement('p');
+      msg.id = 'emptyMsg';
+      msg.textContent = 'No chapter_XXX.mp3 files found in this folder yet.';
+      libraryBody.appendChild(msg);
+    } else {
+      data.chapters.forEach(function(base){
+        var row = document.createElement('button');
+        row.className = 'chapterRow';
+        row.textContent = humanize(base);
+        row.addEventListener('click', function(){ openChapter(base); });
+        libraryBody.appendChild(row);
+      });
+    }
+
+    var changeBtn = document.createElement('button');
+    changeBtn.id = 'changeFolderBtn';
+    changeBtn.textContent = 'Change folder';
+    changeBtn.addEventListener('click', function(){ Android.pickFolder(); });
+    libraryBody.appendChild(changeBtn);
+  }
+
+  window.onFolderPicked = function(){
+    renderLibrary();
+  };
+
+  function openChapter(base){
+    var syncText = Android.readTextFile(base + '.sync.json');
+    var data;
+    try {
+      data = JSON.parse(syncText);
+    } catch(e){
+      alert('Could not read ' + base + '.sync.json');
+      return;
+    }
+    chunks = data.chunks || [];
+    idx = -1;
+    shown = false;
+    audio.pause();
+
+    pendingChapterBase = base;
+    libraryScreen.style.display = 'none';
+    readerScreen.style.display = 'flex';
+    pageText.style.display = 'none';
+    loadingOverlay.style.display = 'block';
+    loadingPercent.textContent = '0';
+
+    Android.prepareChapterAudio(base);
+  }
+
+  window.onAudioPrepareProgress = function(base, percent){
+    if (base !== pendingChapterBase) return;
+    loadingPercent.textContent = percent;
+  };
+
+  window.onAudioPrepareReady = function(base){
+    if (base !== pendingChapterBase) return;
+    chapterTimeOffset = 0;
+    audio.src = 'https://appassets.androidplatform.net/internal-audio/' + base + '.mp3';
+    loadingOverlay.style.display = 'none';
+    pageText.style.display = 'flex';
+    updateForTime(0);
+  };
+
+  window.onAudioPrepareFailed = function(base, reason){
+    if (base !== pendingChapterBase) return;
+    alert('Could not prepare audio for ' + base + ': ' + reason + ' - check Logcat (tag ChapterAudio) for details.');
+    loadingOverlay.style.display = 'none';
+    pageText.style.display = 'flex';
+    readerScreen.style.display = 'none';
+    libraryScreen.style.display = 'block';
+  };
+
+  backBtn.addEventListener('click', function(){
+    audio.pause();
+    readerScreen.style.display = 'none';
+    libraryScreen.style.display = 'block';
+  });
+
+  function fitFontSize(text, availW, availH){
+    measure.style.height = availH + 'px';
+    for(var f = MAX_F; f >= ABS_MIN; f -= 1){
+      measure.style.fontSize = f + 'px';
+      measure.textContent = text;
+      if(measure.scrollWidth <= availW) return f;
+    }
+    return ABS_MIN;
+  }
+
+  function showPage(i){
+    var chunk = chunks[i];
+    var availW = frame.clientWidth - PAD * 2;
+    var availH = frame.clientHeight - PAD * 2;
+    var f = fitFontSize(chunk.text, availW, availH);
+    pageText.style.opacity = '0';
+    pageText.style.fontSize = f + 'px';
+    pageText.textContent = chunk.text;
+    requestAnimationFrame(function(){ pageText.style.opacity = '1'; });
+    meta.textContent = (i + 1) + ' / ' + chunks.length + '  ·  ' + f + 'px  ·  ' + chunk.text.length + ' chars';
+  }
+
+  function blankPage(){
+    pageText.style.opacity = '0';
+    pageText.textContent = '';
+    meta.textContent = '(silence)';
+  }
+
+  function currentChunkIndex(t){
+    var i = 0;
+    for(var k = 0; k < chunks.length; k++){
+      if(chunks[k].start <= t) i = k; else break;
+    }
+    return i;
+  }
+
+  function updateForTime(t){
+    if(chunks.length === 0) return;
+    var newIdx = currentChunkIndex(t);
+    var chunk = chunks[newIdx];
+    var active = t >= chunk.start && t < chunk.end;
+
+    if(newIdx !== idx || active !== shown){
+      idx = newIdx;
+      shown = active;
+      if(shown){
+        showPage(idx);
+      } else {
+        blankPage();
+      }
+    }
+
+    if(shown){
+      var pct = ((t - chunk.start) / (chunk.end - chunk.start)) * 100;
+      progressBar.style.width = pct + '%';
+    } else {
+      progressBar.style.width = '0%';
+    }
+  }
+
+  function bufferedRangesString(){
+    var s = '';
+    for (var i = 0; i < audio.buffered.length; i++){
+      s += '[' + audio.buffered.start(i).toFixed(2) + '-' + audio.buffered.end(i).toFixed(2) + ']';
+    }
+    return s || '(none)';
+  }
+
+  ['waiting','stalled','suspend','canplay','loadeddata','loadedmetadata','seeking','seeked','emptied','abort'].forEach(function(evt){
+    audio.addEventListener(evt, function(){
+      console.log('AUDIO ' + evt + ' t=' + audio.currentTime.toFixed(2) + ' readyState=' + audio.readyState + ' networkState=' + audio.networkState + ' buffered=' + bufferedRangesString());
+    });
+  });
+
+  audio.addEventListener('error', function(){
+    var err = audio.error;
+    console.log('AUDIO ERROR code=' + (err ? err.code : 'null') + ' message=' + (err ? err.message : '(none)') + ' t=' + audio.currentTime.toFixed(2));
+  });
+
+  audio.addEventListener('timeupdate', function(){
+    var t = audio.currentTime;
+    if (isNaN(t)) {
+      console.log('AUDIO timeupdate: currentTime is NaN, ignoring');
+      return;
+    }
+    updateForTime(t + chapterTimeOffset);
+  });
+  audio.addEventListener('play', function(){ playBtn.textContent = 'Pause'; });
+  audio.addEventListener('pause', function(){ playBtn.textContent = 'Play'; });
+
+  playBtn.addEventListener('click', function(){
+    if(audio.paused) audio.play(); else audio.pause();
+  });
+
+  // A tiny forward nudge past the exact chunk boundary, same reasoning as
+  // before: landing a hair before the intended start (rounding/frame
+  // snapping) reads as still-the-previous-chunk or as silence.
+  var SEEK_EPSILON = 0.05;
+
+  // Repositioning within an already-loaded <audio> resource proved
+  // completely unreliable in testing - currentTime assignment, a
+  // play/seek/pause cycle, and a Media Fragment (#t=) reload all reset to
+  // 0 regardless of approach (see the Logcat investigation this was built
+  // from). What HAS proven solid is sequential playback of a resource from
+  // its own byte 0 - a full chapter plays start to finish with no issue.
+  // So a "jump" is now a fresh load of a virtual resource that starts at
+  // the target byte offset and presents itself as if that were byte 0 -
+  // sidestepping the broken repositioning path rather than continuing to
+  // chase it. chapterTimeOffset tracks the real chapter time this virtual
+  // resource's own time-0 corresponds to, so updateForTime() keeps working
+  // in real chapter-relative time throughout.
+  function seekToChunk(target){
+    var seekTime = chunks[target].start + SEEK_EPSILON;
+    var wasPlaying = !audio.paused;
+    console.log('SEEK (byte-offset reload): target=' + target + ' seekTime=' + seekTime.toFixed(3) + ' wasPlaying=' + wasPlaying);
+
+    var onLoaded = function(){
+      audio.removeEventListener('loadedmetadata', onLoaded);
+      console.log('SEEK (byte-offset reload): loaded, local currentTime=' + audio.currentTime.toFixed(3) + ' chapterTimeOffset=' + chapterTimeOffset.toFixed(3));
+      if (wasPlaying) audio.play();
+      updateForTime(seekTime);
+    };
+    audio.addEventListener('loadedmetadata', onLoaded);
+    chapterTimeOffset = seekTime;
+    audio.src = 'https://appassets.androidplatform.net/internal-audio-offset/' + pendingChapterBase + '.mp3/' + seekTime;
+    audio.load();
+  }
+
+  prevBtn.addEventListener('click', function(){
+    seekToChunk(Math.max(0, idx - 1));
+  });
+  nextBtn.addEventListener('click', function(){
+    seekToChunk(Math.min(chunks.length - 1, idx + 1));
+  });
+
+  renderLibrary();
+})();
+</script>
+</body>
+</html>
