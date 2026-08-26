@@ -1,8 +1,6 @@
 # SHAMA — a Japanese audiobook reader for Android
 
-<p align="center">
-  <img src="icon.jpg" width="120" alt="SHAMA app icon" />
-</p>
+
 
 SHAMA plays audiobooks the way you'd actually want to read along with
 them: vertical, page-by-page Japanese text that highlights itself
