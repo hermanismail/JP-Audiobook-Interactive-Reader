@@ -10,6 +10,13 @@
   #libraryScreen h1 { font-size:18px; font-weight:500; margin:0 0 16px; }
   #chooseFolderBtn, .chapterRow, #changeFolderBtn { display:block; width:100%; box-sizing:border-box; text-align:left; padding:14px 16px; margin-bottom:10px; border-radius:10px; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; font-size:15px; }
   #changeFolderBtn { background:none; border:none; color:#9b93b0; font-size:13px; text-decoration:underline; width:auto; }
+  #continueRow { border-color:#e08a3c; color:#e08a3c; }
+  .sectionLabel { color:#9a97a0; font-size:12px; margin:16px 0 8px; text-transform:uppercase; letter-spacing:0.04em; }
+
+  .bookmarkWrap { position:relative; overflow:hidden; margin-bottom:10px; border-radius:10px; }
+  .bookmarkWrap .bookmarkRow { margin-bottom:0; position:relative; z-index:1; }
+  .bookmarkDelete { position:absolute; top:0; right:0; bottom:0; width:72px; border:none;
+    background:#7a3030; color:#fff; font-size:13px; }
   #emptyMsg { color:#9a97a0; font-size:14px; margin-bottom:16px; }
 
   #readerScreen { display:none; height:100%; box-sizing:border-box; flex-direction:column; padding:16px; gap:10px; touch-action:none; }
@@ -19,6 +26,12 @@
   #pageText span { transition:color 0.2s ease; }
   #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; white-space:normal; overflow-wrap:anywhere; }
   #loadingOverlay { display:none; color:#9b93b0; font-size:14px; text-align:center; }
+
+  #bookmarkToast { position:fixed; left:50%; top:16px; transform:translateX(-50%);
+    background:#17161a; border:1px solid #3a3840; color:#e8e6ea; padding:8px 16px;
+    border-radius:999px; font-size:13px; opacity:0; transition:opacity 0.3s;
+    pointer-events:none; z-index:20; white-space:nowrap; }
+  #bookmarkToast.show { opacity:1; }
 
   #timeRow { display:flex; justify-content:space-between; font-size:12px; color:#c9c6cf; padding:0 2px; }
 
@@ -71,6 +84,8 @@
     <div id="loadingOverlay">Preparing chapter&hellip; <span id="loadingPercent">0</span>%</div>
     <div id="measure"></div>
   </div>
+
+  <div id="bookmarkToast"></div>
 
   <div id="timeRow">
     <span id="elapsedLabel">0:00</span>
@@ -139,6 +154,7 @@
   var frame = document.getElementById('frame');
   var loadingOverlay = document.getElementById('loadingOverlay');
   var loadingPercent = document.getElementById('loadingPercent');
+  var bookmarkToast = document.getElementById('bookmarkToast');
 
   var elapsedLabel = document.getElementById('elapsedLabel');
   var totalLabel = document.getElementById('totalLabel');
@@ -168,6 +184,7 @@
   var idx = -1;
   var shown = false;
   var pendingChapterBase = null;
+  var pendingResumeSeconds = null;
   var allChapters = [];
   var chapterDuration = 0;
   var durationKnown = false;
@@ -177,9 +194,14 @@
   var chunkLitCount = 0;
   var PAD = 26, MAX_F = 68, ABS_MIN = 10;
 
-  function humanize(base){
+  function chapterNumber(base){
     var m = base.match(/(\d+)$/);
-    return m ? ('Chapter ' + parseInt(m[1], 10)) : base;
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function humanize(base){
+    var n = chapterNumber(base);
+    return n !== null ? ('Chapter ' + n) : base;
   }
 
   function formatTime(s){
@@ -218,6 +240,21 @@
     libraryTitle.textContent = data.bookTitle || 'JP Audiobook Player';
     allChapters = data.chapters || [];
 
+    var extra = { lastPosition: null, bookmarks: [] };
+    try { extra = JSON.parse(Android.listBookmarksAndLastPosition()); } catch(e){}
+
+    if (extra.lastPosition) {
+      var continueRow = document.createElement('button');
+      continueRow.className = 'chapterRow';
+      continueRow.id = 'continueRow';
+      continueRow.textContent = 'Continue: ' + humanize(extra.lastPosition.chapterBase) +
+        ' (' + formatTime(extra.lastPosition.positionSeconds) + ')';
+      continueRow.addEventListener('click', function(){
+        openChapter(extra.lastPosition.chapterBase, extra.lastPosition.positionSeconds);
+      });
+      libraryBody.appendChild(continueRow);
+    }
+
     if(data.chapters.length === 0){
       var msg = document.createElement('p');
       msg.id = 'emptyMsg';
@@ -238,6 +275,107 @@
     changeBtn.textContent = 'Change folder';
     changeBtn.addEventListener('click', function(){ Android.pickFolder(); });
     libraryBody.appendChild(changeBtn);
+
+    renderBookmarksSection(extra.bookmarks || []);
+  }
+
+  var DELETE_WIDTH = 72;
+
+  // Swipe-to-reveal-delete bookmark list, "under" the Change folder
+  // button. Only one row can be open at a time; a tap while a row is
+  // already open just closes it instead of navigating (standard
+  // swipe-list convention), a tap while closed resumes to that bookmark.
+  function renderBookmarksSection(bookmarks){
+    if (!bookmarks.length) return;
+
+    var label = document.createElement('div');
+    label.className = 'sectionLabel';
+    label.textContent = 'Bookmarks';
+    libraryBody.appendChild(label);
+
+    var openRowWrap = null;
+
+    bookmarks.forEach(function(bm){
+      var wrap = document.createElement('div');
+      wrap.className = 'bookmarkWrap';
+
+      var deleteBtn = document.createElement('button');
+      deleteBtn.className = 'bookmarkDelete';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.addEventListener('click', function(){
+        Android.deleteBookmark(bm.id);
+        renderLibrary();
+      });
+
+      var row = document.createElement('button');
+      row.className = 'chapterRow bookmarkRow';
+      row.textContent = bm.label + ' — ' + humanize(bm.chapterBase);
+      row.style.touchAction = 'pan-y';
+
+      var isOpen = false;
+      var dragStartX = null;
+      var baseX = 0;
+
+      function setOffset(px){
+        row.style.transform = 'translateX(' + px + 'px)';
+      }
+
+      wrap._closeBookmarkRow = function(){
+        isOpen = false;
+        row.style.transition = 'transform 0.2s';
+        setOffset(0);
+      };
+
+      row.addEventListener('pointerdown', function(e){
+        dragStartX = e.clientX;
+        baseX = isOpen ? -DELETE_WIDTH : 0;
+        row.style.transition = 'none';
+        try { row.setPointerCapture(e.pointerId); } catch(err){}
+      });
+
+      row.addEventListener('pointermove', function(e){
+        if (dragStartX === null) return;
+        var offset = baseX + (e.clientX - dragStartX);
+        offset = Math.max(-DELETE_WIDTH, Math.min(0, offset));
+        setOffset(offset);
+      });
+
+      row.addEventListener('pointerup', function(e){
+        if (dragStartX === null) return;
+        var dx = e.clientX - dragStartX;
+        dragStartX = null;
+        row.style.transition = 'transform 0.2s';
+
+        if (Math.abs(dx) < 8) {
+          // Tap, not a drag.
+          if (isOpen) {
+            wrap._closeBookmarkRow();
+          } else {
+            openChapter(bm.chapterBase, bm.positionSeconds);
+          }
+          return;
+        }
+
+        var finalOffset = baseX + dx;
+        if (finalOffset <= -DELETE_WIDTH / 2) {
+          if (openRowWrap && openRowWrap !== wrap) openRowWrap._closeBookmarkRow();
+          openRowWrap = wrap;
+          isOpen = true;
+          setOffset(-DELETE_WIDTH);
+        } else {
+          isOpen = false;
+          setOffset(0);
+        }
+      });
+
+      row.addEventListener('pointercancel', function(){
+        dragStartX = null;
+      });
+
+      wrap.appendChild(deleteBtn);
+      wrap.appendChild(row);
+      libraryBody.appendChild(wrap);
+    });
   }
 
   window.onFolderPicked = function(){
@@ -251,7 +389,7 @@
     Android.stopPlaybackSession();
   }
 
-  function openChapter(base){
+  function openChapter(base, resumeSeconds){
     var syncText = Android.readTextFile(base + '.sync.json');
     var data;
     try {
@@ -266,6 +404,7 @@
     audio.pause();
 
     pendingChapterBase = base;
+    pendingResumeSeconds = (typeof resumeSeconds === 'number' && resumeSeconds > 0) ? resumeSeconds : null;
     durationKnown = false;
     chapterDuration = chunks.length ? chunks[chunks.length - 1].end : 0;
     totalLabel.textContent = formatTime(chapterDuration);
@@ -294,13 +433,26 @@
 
   window.onAudioPrepareReady = function(base, metadataJson){
     if (base !== pendingChapterBase) return;
-    chapterTimeOffset = 0;
-    audio.src = 'https://appassets.androidplatform.net/internal-audio/' + base + '.mp3';
-    audio.playbackRate = currentSpeed;
     loadingOverlay.style.display = 'none';
     pageText.style.display = 'flex';
-    updateForTime(0);
-    audio.play().catch(function(e){ console.log('autoplay failed: ' + e); });
+
+    var resumeSeconds = pendingResumeSeconds;
+    pendingResumeSeconds = null;
+
+    if (resumeSeconds) {
+      // seekToTime() only resumes playback itself if audio was already
+      // playing before the seek (drag-to-seek/next/prev case) - nothing
+      // has played yet here, so it won't auto-play on its own; call
+      // play() explicitly, same as the fresh-open branch below already does.
+      seekToTime(resumeSeconds);
+      audio.play().catch(function(e){ console.log('resume autoplay failed: ' + e); });
+    } else {
+      chapterTimeOffset = 0;
+      audio.src = 'https://appassets.androidplatform.net/internal-audio/' + base + '.mp3';
+      audio.playbackRate = currentSpeed;
+      updateForTime(0);
+      audio.play().catch(function(e){ console.log('autoplay failed: ' + e); });
+    }
 
     var meta = {};
     try { meta = JSON.parse(metadataJson || '{}'); } catch(e){}
@@ -377,9 +529,17 @@
     });
   }
 
+  // Numerator/denominator are the real chapter numbers parsed from the
+  // filenames, not folder-relative position - chapters get copied to the
+  // phone in batches and old ones deleted after reading, so the folder
+  // is rarely a contiguous 1..N run (e.g. only chapters 5-10 present
+  // should read "5/10" while chapter 5 is open, not "1/6").
   function updateChapterPill(){
-    var chapterIndex = allChapters.indexOf(pendingChapterBase) + 1;
-    var chapterTotal = allChapters.length;
+    var chapterIndex = chapterNumber(pendingChapterBase) || 0;
+    var chapterTotal = allChapters.reduce(function(max, base){
+      var n = chapterNumber(base);
+      return (n !== null && n > max) ? n : max;
+    }, 0);
     var chunkPos = idx >= 0 ? (idx + 1) : 0;
     chapterPill.textContent = 'Chapter ' + chapterIndex + '/' + chapterTotal + '   progress ' + chunkPos + '/' + chunks.length;
   }
@@ -556,7 +716,7 @@
     var sec = Math.floor(t);
     if (!force && sec === lastReportedSecond) return;
     lastReportedSecond = sec;
-    Android.reportPlaybackState(!audio.paused, t, chapterDuration, currentSpeed);
+    Android.reportPlaybackState(!audio.paused, t, chapterDuration, currentSpeed, pendingChapterBase);
   }
 
   audio.addEventListener('play', function(){ reportPlaybackState(true); });
@@ -649,6 +809,10 @@
   var SWIPE_MIN_DX = 48;
   var TAP_MAX_MOVE = 12;
   var TAP_GAP_MS = 300;
+  // Deliberately a bit harder to trigger than a page-turn swipe, since it
+  // has a lasting effect (creates a bookmark) rather than just moving a
+  // page forward/back.
+  var VSWIPE_MIN_DY = 64;
 
   var pointerStart = null;
   var tapCount = 0;
@@ -685,10 +849,34 @@
       goNext();
     } else if (horizontal && -dx >= SWIPE_MIN_DX && startedNearRight) {
       goPrev();
+    } else if (!horizontal && -dy >= VSWIPE_MIN_DY) {
+      saveBookmarkGesture();
     } else if (Math.abs(dx) < TAP_MAX_MOVE && Math.abs(dy) < TAP_MAX_MOVE) {
       registerTap();
     }
   });
+
+  // Swipe up (anywhere on the text area, not edge-gated) to bookmark the
+  // current chapter+time. Auto-labeled by date/time on the native side
+  // (MainActivity.saveBookmarkRecord) - see the library screen's
+  // Bookmarks section for viewing/deleting them.
+  function saveBookmarkGesture(){
+    if (!pendingChapterBase) return;
+    var t = (audio.currentTime || 0) + chapterTimeOffset;
+    var json;
+    try { json = JSON.parse(Android.saveBookmark(pendingChapterBase, t)); } catch(e){ json = null; }
+    if (json && !json.error) {
+      showBookmarkToast(json.label);
+    }
+  }
+
+  var bookmarkToastTimer = null;
+  function showBookmarkToast(text){
+    bookmarkToast.textContent = text;
+    bookmarkToast.classList.add('show');
+    if (bookmarkToastTimer) clearTimeout(bookmarkToastTimer);
+    bookmarkToastTimer = setTimeout(function(){ bookmarkToast.classList.remove('show'); }, 1600);
+  }
 
   // --- Drag-to-seek on the progress track.
   function scrubTargetFromEvent(e){

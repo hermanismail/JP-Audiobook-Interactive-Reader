@@ -34,6 +34,10 @@ import java.io.FileInputStream
 private const val TAG = "ChapterAudio"
 private const val PREFS_NAME = "jp_audiobook_player"
 private const val KEY_TREE_URI = "library_tree_uri"
+// Both suffixed with the folder's own tree URI so switching books (via
+// "Change folder") can't leak one book's position/bookmarks into another.
+private const val KEY_LAST_POSITION_PREFIX = "last_position:"
+private const val KEY_BOOKMARKS_PREFIX = "bookmarks:"
 private const val VIRTUAL_HOST = "appassets.androidplatform.net"
 private const val AUDIO_OFFSET_PATH_PREFIX = "/internal-audio-offset/"
 private const val COVER_ART_PATH_PREFIX = "/internal-cover/"
@@ -284,6 +288,80 @@ class MainActivity : ComponentActivity() {
         return contentResolver.openInputStream(target.uri)?.use { stream ->
             stream.readBytes().toString(Charsets.UTF_8)
         }
+    }
+
+    private fun lastPositionKey(treeUri: Uri) = KEY_LAST_POSITION_PREFIX + treeUri.toString()
+    private fun bookmarksKey(treeUri: Uri) = KEY_BOOKMARKS_PREFIX + treeUri.toString()
+
+    private fun saveLastPosition(chapterBase: String, positionSeconds: Double) {
+        val treeUri = savedTreeUri() ?: return
+        val obj = JSONObject().apply {
+            put("chapterBase", chapterBase)
+            put("positionSeconds", positionSeconds)
+            put("updatedAt", System.currentTimeMillis())
+        }
+        getPrefs().edit().putString(lastPositionKey(treeUri), obj.toString()).apply()
+    }
+
+    private fun readLastPosition(): JSONObject? {
+        val treeUri = savedTreeUri() ?: return null
+        val stored = getPrefs().getString(lastPositionKey(treeUri), null) ?: return null
+        return try {
+            JSONObject(stored)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun readBookmarks(): JSONArray {
+        val treeUri = savedTreeUri() ?: return JSONArray()
+        val stored = getPrefs().getString(bookmarksKey(treeUri), null) ?: return JSONArray()
+        return try {
+            JSONArray(stored)
+        } catch (e: Exception) {
+            JSONArray()
+        }
+    }
+
+    private fun writeBookmarks(treeUri: Uri, arr: JSONArray) {
+        getPrefs().edit().putString(bookmarksKey(treeUri), arr.toString()).apply()
+    }
+
+    private val bookmarkDateFormat by lazy {
+        java.text.SimpleDateFormat("MMM d, yyyy 'at' h:mm a", java.util.Locale.getDefault())
+    }
+
+    /**
+     * Appends a new bookmark for the current folder and returns it. Bound
+     * to a specific chapter+time (not a chunk index) so resuming just
+     * reuses the same seekToTime() primitive as drag-to-seek/next/prev/
+     * lock-screen scrubbing - see window.mediaSeekTo in index.html.
+     */
+    private fun saveBookmarkRecord(chapterBase: String, positionSeconds: Double): JSONObject {
+        val treeUri = savedTreeUri() ?: throw IllegalStateException("no library folder saved")
+        val now = System.currentTimeMillis()
+        val record = JSONObject().apply {
+            put("id", java.util.UUID.randomUUID().toString())
+            put("chapterBase", chapterBase)
+            put("positionSeconds", positionSeconds)
+            put("label", bookmarkDateFormat.format(java.util.Date(now)))
+            put("createdAt", now)
+        }
+        val arr = readBookmarks()
+        arr.put(record)
+        writeBookmarks(treeUri, arr)
+        return record
+    }
+
+    private fun deleteBookmarkRecord(id: String) {
+        val treeUri = savedTreeUri() ?: return
+        val arr = readBookmarks()
+        val filtered = JSONArray()
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            if (obj.optString("id") != id) filtered.put(obj)
+        }
+        writeBookmarks(treeUri, filtered)
     }
 
     /**
@@ -748,9 +826,15 @@ class MainActivity : ComponentActivity() {
         // Mirrors the WebView <audio> element's play/pause/position/speed
         // into the MediaSession that actually drives the lock-screen and
         // notification controls - title/artist/cover are set separately,
-        // natively, in onChapterAudioReady() above.
+        // natively, in onChapterAudioReady() above. Also persists the
+        // position (outside runOnUiThread - pure SharedPreferences/JSON
+        // work, nothing UI-thread-sensitive about it) so it survives the
+        // process being killed after the phone's been idle a while; this
+        // already fires ~1/sec while playing plus forced on play/pause/
+        // speed-change, so no extra throttling is needed here.
         @JavascriptInterface
-        fun reportPlaybackState(isPlaying: Boolean, positionSeconds: Double, durationSeconds: Double, speed: Double) {
+        fun reportPlaybackState(isPlaying: Boolean, positionSeconds: Double, durationSeconds: Double, speed: Double, chapterBase: String) {
+            saveLastPosition(chapterBase, positionSeconds)
             runOnUiThread {
                 playbackService?.updatePlaybackState(isPlaying, positionSeconds, durationSeconds, speed.toFloat())
             }
@@ -759,6 +843,28 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun stopPlaybackSession() {
             runOnUiThread { playbackService?.stopSession() }
+        }
+
+        @JavascriptInterface
+        fun saveBookmark(chapterBase: String, positionSeconds: Double): String {
+            return try {
+                saveBookmarkRecord(chapterBase, positionSeconds).toString()
+            } catch (e: Exception) {
+                JSONObject().apply { put("error", e.message ?: "no library folder saved") }.toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun listBookmarksAndLastPosition(): String {
+            val result = JSONObject()
+            result.put("lastPosition", readLastPosition() ?: JSONObject.NULL)
+            result.put("bookmarks", readBookmarks())
+            return result.toString()
+        }
+
+        @JavascriptInterface
+        fun deleteBookmark(id: String) {
+            deleteBookmarkRecord(id)
         }
     }
 }

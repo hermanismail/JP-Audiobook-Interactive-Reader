@@ -5,11 +5,11 @@ Context handoff for Claude Code, continuing work started in Claude Desktop
 
 ## Handoff snapshot
 
-- **As of:** August 26, 2026
+- **As of:** August 27, 2026
 - **Git status:** initialized. Branch `main`, remote `origin` →
   https://github.com/hermanismail/JP-Audiobook-Interactive-Reader.git,
   `.gitignore` excludes `.gradle/`, `.idea/`, `.kotlin/`, `app/build/`, and
-  `local.properties` (machine-specific SDK path). Three commits so far:
+  `local.properties` (machine-specific SDK path). Commits so far:
   - `c1e9cd1` — initial Phase 4 Android player shell (uncompiled at the time)
   - `472e5ba` — full reader-screen redesign: gesture controls (tap to
     play/pause, triple-tap to library, edge-swipe for prev/next chunk),
@@ -18,6 +18,14 @@ Context handoff for Claude Code, continuing work started in Claude Desktop
   - `56bfc0f` — dark status/nav bar, autoplay on chapter open + automatic
     continuous playback into the next chapter, character-by-character
     "karaoke" text highlighting during playback
+  - `126a9fe` — lock-screen/notification media controls (`PlaybackService`)
+  - `f17fca0` — app icon (from the user's own photo) + label ("SHAMA")
+  - `add7e0c` — README rewrite for the completed first version
+  - `c07cd23` — bottom-bar rework: author on top / book title on bottom
+    (each row sizes independently against its own pill instead of sharing
+    one column across both rows)
+  - (pending) — real chapter-number-based progress counter + persisted
+    resume position + named/dated bookmarks, see below
 - Treat "Current status" and "Priority testing checklist" below as the
   source of truth for what actually works, independent of what git tracks
   — update both as things get confirmed or change.
@@ -81,6 +89,17 @@ working via direct on-device testing, not just "written."
     crossing the Binder IPC boundary to system UI) and pushes
     title/artist/album/cover to the service natively, before the JS side
     even knows the chapter is ready.
+  - Resume position + bookmarks are persisted as flat, folder-URI-suffixed
+    SharedPreferences keys (`last_position:<treeUri>`,
+    `bookmarks:<treeUri>`) in the same prefs file as `KEY_TREE_URI` — this
+    scopes them per-book so switching folders via "Change folder" can't
+    leak one book's bookmarks into another. `reportPlaybackState` now
+    takes a `chapterBase` param and persists the position on every call
+    (already throttled to ~1/sec by the JS side, so no extra native
+    throttling); `saveBookmark`/`listBookmarksAndLastPosition`/
+    `deleteBookmark` round out the bridge. All hand-rolled
+    `JSONObject`/`JSONArray` building, matching `listChaptersJson()` — no
+    serialization library in this project.
 - `app/src/main/java/.../PlaybackService.kt` — foreground service holding
   the `MediaSessionCompat` behind the lock-screen/notification media
   control. Owns no playback state itself; mirrors whatever the WebView's
@@ -134,6 +153,25 @@ working via direct on-device testing, not just "written."
     around in `showPage()` (`overflow-wrap: anywhere` plus a `display`
     toggle to force real re-layout). If vertical text ever collapses into
     one overflowing column again, start there.
+  - The chapter/progress pill (`updateChapterPill`) shows the real chapter
+    number parsed from the filename over the highest chapter number
+    present in the folder (`chapterNumber()`/`allChapters.reduce(...)`),
+    not folder-relative position — chapters get copied to the phone in
+    batches and old ones deleted after reading, so the folder is rarely a
+    contiguous run.
+  - Swipe up on the text area (anywhere, not edge-gated;
+    `VSWIPE_MIN_DY = 64`) bookmarks the current chapter+time via
+    `Android.saveBookmark`, with a brief fading confirmation
+    (`#bookmarkToast`). The library screen (`renderLibrary()`) shows, in
+    order: a "Continue" row (if a resume position exists for this folder,
+    accent-colored) → the chapter list → "Change folder" → a "Bookmarks"
+    section, each row swipe-left-to-reveal a delete button (per-row
+    Pointer Events drag, mutual exclusion so only one row is open at a
+    time, tap-while-open closes rather than navigates). `openChapter(base,
+    resumeSeconds)` takes an optional second param consumed once in
+    `onAudioPrepareReady` to seek there instead of starting from 0 — reuses
+    the same `seekToTime()` primitive as drag-to-seek/next/prev/lock-screen
+    scrubbing.
 
 ## Build setup
 
@@ -194,6 +232,22 @@ and its fix).
    launch (API 33+), and a Bluetooth headset's play/pause button (if one's
    available to test with) reaches the same code path as the notification
    buttons.
+6. **Resume position surviving a real process kill** (new, built
+   2026-08-27 — functionally verified in-browser with a mocked bridge and
+   passes `:app:assembleDebug`, but the actual "survives Android killing
+   the app" scenario this was built for can only be checked on a device):
+   pick a folder, play into a chapter for a bit, `adb shell am force-stop
+   com.misao.jpaudiobookplayer` (or just leave the phone idle long enough
+   for the OS to reclaim it), relaunch, confirm the library screen's
+   "Continue" row shows the right chapter and time.
+7. **Bookmarks** (same build, same caveat): swipe up while reading saves
+   one (confirm the toast appears with a sensible date/time label);
+   confirm it shows up under "Change folder" after returning to the
+   library; swipe a bookmark row left, confirm the delete button appears
+   and actually deletes it; confirm tapping a bookmark resumes at the
+   exact saved time; confirm a bookmark/last-position pointing at a
+   chapter file since deleted from the folder falls through gracefully to
+   the existing "could not prepare audio" alert rather than crashing.
 
 ## Known gaps
 

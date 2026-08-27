@@ -49,6 +49,15 @@ with the text for attention.
 - **Lock-screen and notification media controls**, backed by a real
   `MediaSession` — play/pause/skip from the lock screen, a Bluetooth
   headset, or Android Auto all reach the same playback
+- **Chapter counter reflects the actual book, not the folder** — shows
+  the real chapter number over the highest chapter number currently on
+  the phone (e.g. "5/10"), since chapters get added and deleted in
+  batches and rarely form a contiguous run
+- **Remembers your position automatically**, per book, so picking the
+  app back up after it's been idle long enough for Android to kill it
+  still resumes exactly where you left off
+- **Bookmarks** — swipe up while reading to save a dated bookmark;
+  manage them from the library screen (swipe left on one to delete it)
 - **Fully offline** — pick a folder once (Storage Access Framework, no
   storage permission needed) and everything after that is local; no
   account, no network calls, no ads
@@ -86,6 +95,9 @@ control.
 - **Storage Access Framework** (`ActivityResultContracts.OpenDocumentTree`)
   for folder access, with the permission persisted so it isn't
   re-prompted every launch
+- **Resume position and bookmarks are plain SharedPreferences**, keyed by
+  the folder's own SAF URI so each book keeps its own — no database, no
+  sync, nothing that survives longer than the phone itself
 - **Gradle (AGP 9.3.2)** with Kotlin's built-in compiler support (no
   separate Kotlin Gradle plugin)
 
@@ -113,5 +125,6 @@ a file format, not a codebase.
 
 The first version is built and running on a real device, with the
 gesture-driven reader, autoplay/continuous playback, karaoke highlight,
-and lock-screen controls all in place. See `CLAUDE.md` for the detailed
-testing checklist and known gaps if you're picking up development.
+lock-screen controls, resume position, and bookmarks all in place. See
+`CLAUDE.md` for the detailed testing checklist and known gaps if you're
+picking up development.
