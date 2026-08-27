@@ -27,20 +27,24 @@
   #progressFill { position:absolute; left:0; top:0; height:100%; width:0%; background:#e08a3c; border-radius:2px; }
   #progressMarker { position:absolute; top:50%; left:0%; width:12px; height:12px; margin-left:-6px; margin-top:-6px; border-radius:50%; background:#e08a3c; box-shadow:0 0 0 6px rgba(224,138,60,0.15); }
 
-  #metaRow { display:flex; align-items:center; gap:12px; }
+  #metaRow { display:flex; align-items:stretch; gap:12px; }
   #coverArt, #coverPlaceholder { width:56px; height:56px; border-radius:6px; flex-shrink:0; object-fit:cover; background:#1c1a20; border:1px solid #322f38; }
   #coverPlaceholder { display:flex; align-items:center; justify-content:center; color:#4a4650; font-size:22px; }
 
-  #metaTextCol { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
-  #chapterTitle { font-size:16px; font-weight:600; color:#e8e6ea; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .marqueeBox { overflow:hidden; white-space:nowrap; font-size:12px; color:#9b93b0; }
+  /* Each row splits its own text/pill space independently (rather than a
+     shared text column + shared pill column across both rows), so a
+     narrower pill (speed) lets its row's text run wider than a row stuck
+     next to a wider pill (chapter/progress). */
+  #metaCol { flex:1; min-width:0; display:flex; flex-direction:column; justify-content:space-between; }
+  .metaLine { display:flex; align-items:center; gap:10px; }
+  #chapterTitle { flex:1; min-width:0; font-size:16px; font-weight:600; color:#e8e6ea; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .marqueeBox { flex:1; min-width:0; overflow:hidden; white-space:nowrap; font-size:12px; color:#9b93b0; }
   .marqueeBox .marqueeInner { display:inline-flex; }
   .marqueeBox .marqueeGap { display:inline-block; width:36px; flex-shrink:0; }
   .marqueeBox.scrolling .marqueeInner { animation-name: marqueeScroll; animation-timing-function: linear; animation-iteration-count: infinite; }
   @keyframes marqueeScroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-  #pillsCol { flex-shrink:0; display:flex; flex-direction:column; gap:6px; align-items:flex-end; }
-  .pill { display:flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; font-size:12px; white-space:nowrap; }
+  .pill { flex-shrink:0; display:flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; font-size:12px; white-space:nowrap; }
   .pill svg { flex-shrink:0; }
 
   #speedOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); align-items:center; justify-content:center; z-index:10; touch-action:none; }
@@ -82,16 +86,18 @@
   <div id="metaRow">
     <img id="coverArt" style="display:none;">
     <div id="coverPlaceholder">&#9834;</div>
-    <div id="metaTextCol">
-      <div id="chapterTitle"></div>
-      <div id="authorTitle" class="marqueeBox"></div>
-    </div>
-    <div id="pillsCol">
-      <div id="chapterPill" class="pill"></div>
-      <button id="speedPill" class="pill">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 12 L16 8"/><circle cx="12" cy="12" r="9"/></svg>
-        <span id="speedLabel">1.00x</span>
-      </button>
+    <div id="metaCol">
+      <div class="metaLine">
+        <div id="chapterTitle"></div>
+        <div id="chapterPill" class="pill"></div>
+      </div>
+      <div class="metaLine">
+        <div id="authorTitle" class="marqueeBox"></div>
+        <button id="speedPill" class="pill">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 12 L16 8"/><circle cx="12" cy="12" r="9"/></svg>
+          <span id="speedLabel">1.00x</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -311,13 +317,24 @@
   };
 
   function applyMetadata(meta){
+    // Top line is the author - the chapter identity is already covered by
+    // chapterPill (e.g. "Chapter 2/2"), so this line is more useful showing
+    // who's reading/writing. Falls back to the chapter title tag, then
+    // whatever openChapter() already put there (humanizeChapterName), if
+    // there's no artist tag.
     var title = (meta.title || '').trim();
-    if (title) chapterTitleEl.textContent = title;
-
     var author = (meta.artist || '').trim();
     var album = (meta.album || '').trim();
-    var label = author && album ? (author + ' ・ ' + album) : (author || album);
-    setupMarquee(authorTitleEl, label);
+    if (author) {
+      chapterTitleEl.textContent = author;
+    } else if (title) {
+      chapterTitleEl.textContent = title;
+    }
+
+    // Bottom line is the book title alone now (author moved up) - stretched
+    // across its row by .marqueeBox's flex:1 already, scrolls via
+    // setupMarquee() if it doesn't fit.
+    setupMarquee(authorTitleEl, album);
 
     if (meta.hasCover) {
       coverArt.src = 'https://appassets.androidplatform.net/internal-cover/' + pendingChapterBase + '.mp3';
