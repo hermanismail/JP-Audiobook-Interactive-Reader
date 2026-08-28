@@ -10,6 +10,18 @@ It's a personal-use Android app (not on the Play Store) built to pair
 with a separate, offline text-to-speech pipeline — see
 [The companion pipeline](#the-companion-pipeline) below.
 
+> **⚠️ Disclaimer:** This project is a standalone audio player - it
+> doesn't include, host, or distribute any book or audio content, and it
+> doesn't generate or extract anything from copyrighted material. It's
+> built to play audiobook folders produced by
+> [JP-Audiobook-Generator](https://github.com/hermanismail/JP-Audiobook-Generator)
+> from text you have the legal right to convert into audio — books
+> you've purchased for personal use, public-domain works, or your own
+> writing. This project takes no position on and has no involvement in
+> how any given audiobook folder was produced; responsibility for that
+> rests with the person who generated it and the person running this
+> player.
+
 <p align="center">
   <img src="JP-Audiobook-Interactive-Reader-Mockup.png" width="360" alt="Reader screen" />
 </p>
