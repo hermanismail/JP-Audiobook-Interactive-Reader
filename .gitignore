@@ -16,3 +16,9 @@ local.properties
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# App icon source + generated launcher icons: icon.jpg is a personal photo
+# not yet cleared for public redistribution (see README) - keep it and
+# everything derived from it out of git until that's resolved.
+/icon.jpg
+app/src/main/res/mipmap-*/ic_launcher.png

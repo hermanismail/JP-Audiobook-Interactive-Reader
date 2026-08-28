@@ -131,6 +131,16 @@ a file format, not a codebase.
    *File → Sync Project with Gradle Files*).
 3. Run on a device or emulator running Android 8.0 (API 26) or newer.
 
+`icon.jpg` and the generated `app/src/main/res/mipmap-*/ic_launcher.png`
+files aren't in this repo - the icon is a personal photo not yet cleared
+for public redistribution (see the disclaimer above; this specifically
+applies to that photo, not the audio content this app plays). Without
+them, the manifest has no `android:icon`/`android:roundIcon` and the app
+just uses Android's own default launcher icon. To build with a real icon,
+supply your own square `icon.jpg` at the repo root, regenerate the
+mipmap PNGs from it, and re-add the icon attributes to
+`AndroidManifest.xml` locally.
+
 ## Status
 
 The first version is built and running on a real device, with the
