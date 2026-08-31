@@ -43,12 +43,22 @@ with the text for attention.
 
 ## Features
 
-- **Gesture-driven reading** — tap to play/pause, triple-tap to return
-  to the library, swipe from the left edge for the next chunk / the
-  right edge for the previous one
-- **Karaoke-style highlight** — chunk text recolors character-by-
-  character in sync with playback, tuned so the sweep completes just
-  before the audio actually finishes rather than lagging behind it
+- **Gesture-driven reading**, with matching icon buttons for anyone who'd
+  rather tap than swipe — tap to play/pause, triple-tap (or the library
+  icon) to return to the library, swipe from the left edge for the next
+  chunk / the right edge for the previous one, swipe up (or the bookmark
+  icon) to save your place
+- **Two text-reveal styles** — the original karaoke-style color sweep, or
+  a softer opacity fade; toggle between them with one tap, and the choice
+  persists across restarts
+- **Zen mode** — physically rotate the phone to landscape to drop into a
+  distraction-free layout: just the vertical text and an optional
+  per-chapter side image, with the rest of the UI and the system
+  status/nav bars hidden until you rotate back
+- **Karaoke-style highlight** — chunk text recolors (or fades in,
+  depending on the chosen style) character-by-character in sync with
+  playback, tuned so it completes just before the audio actually
+  finishes rather than lagging behind it
 - **Whole-chapter progress bar** with a drag-to-seek marker, live
   elapsed/total time
 - **Adjustable playback speed**, 0.25x–8.00x, with quick presets
@@ -105,6 +115,14 @@ control.
 - **Storage Access Framework** (`ActivityResultContracts.OpenDocumentTree`)
   for folder access, with the permission persisted so it isn't
   re-prompted every launch
+- **Zen mode's rotation trigger is the browser's own
+  `matchMedia('orientation: landscape')`**, not raw sensor code — the
+  Activity has no orientation lock, so this rides Android's existing
+  rotation pipeline (and its rotation-lock setting) for free;
+  `WindowInsetsControllerCompat` hides the status/nav bars to match
+- **Optional per-chapter side images** (`chapter_<N>_img_<index>.png/jpg`
+  files alongside the chapter audio) are resolved and rotated natively,
+  falling back to the chapter's own ID3 cover art if none are found
 - **Resume position and bookmarks are plain SharedPreferences**, keyed by
   the folder's own SAF URI so each book keeps its own — no database, no
   sync, nothing that survives longer than the phone itself
@@ -145,6 +163,8 @@ mipmap PNGs from it, and re-add the icon attributes to
 
 The first version is built and running on a real device, with the
 gesture-driven reader, autoplay/continuous playback, karaoke highlight,
-lock-screen controls, resume position, and bookmarks all in place. See
-`CLAUDE.md` for the detailed testing checklist and known gaps if you're
-picking up development.
+lock-screen controls, resume position, bookmarks, the two text-reveal
+styles, and Zen mode all tested on-device and working. A handful of edge
+cases (rotation-lock behavior, real per-chapter side images, very long
+chunks in Zen mode) are still open — see `CLAUDE.md` for the detailed
+testing checklist and known gaps if you're picking up development.
