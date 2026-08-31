@@ -22,6 +22,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.webkit.WebViewAssetLoader
@@ -38,9 +39,13 @@ private const val KEY_TREE_URI = "library_tree_uri"
 // "Change folder") can't leak one book's position/bookmarks into another.
 private const val KEY_LAST_POSITION_PREFIX = "last_position:"
 private const val KEY_BOOKMARKS_PREFIX = "bookmarks:"
+// Deliberately not tree-URI-prefixed, unlike the two keys above - the text
+// preset is a global app setting, not scoped to any one book.
+private const val KEY_TEXT_PRESET = "text_preset"
 private const val VIRTUAL_HOST = "appassets.androidplatform.net"
 private const val AUDIO_OFFSET_PATH_PREFIX = "/internal-audio-offset/"
 private const val COVER_ART_PATH_PREFIX = "/internal-cover/"
+private const val CHAPTER_IMAGE_PATH_PREFIX = "/internal-chapter-image/"
 // run_audiobook.py always encodes with `-b:a 320k` (CBR, no VBR flags), so
 // this gives an accurate byte/time relationship for a rough offset seek -
 // see serveAudioFromTime().
@@ -93,6 +98,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var webView: WebView
     private lateinit var assetLoader: WebViewAssetLoader
+    private lateinit var insetsController: WindowInsetsControllerCompat
     private val internalAudioDir: File by lazy { File(cacheDir, "chapter-audio").apply { mkdirs() } }
 
     private var playbackService: PlaybackService? = null
@@ -168,7 +174,7 @@ class MainActivity : ComponentActivity() {
         window.statusBarColor = android.graphics.Color.BLACK
         @Suppress("DEPRECATION")
         window.navigationBarColor = android.graphics.Color.BLACK
-        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        insetsController = WindowInsetsControllerCompat(window, window.decorView)
         insetsController.isAppearanceLightStatusBars = false
         insetsController.isAppearanceLightNavigationBars = false
 
@@ -205,6 +211,9 @@ class MainActivity : ComponentActivity() {
                 }
                 if (url.host == VIRTUAL_HOST && url.path?.startsWith(COVER_ART_PATH_PREFIX) == true) {
                     return serveCoverArt(url)
+                }
+                if (url.host == VIRTUAL_HOST && url.path?.startsWith(CHAPTER_IMAGE_PATH_PREFIX) == true) {
+                    return serveChapterImage(url)
                 }
                 return assetLoader.shouldInterceptRequest(url)
             }
@@ -280,6 +289,72 @@ class MainActivity : ComponentActivity() {
         chapters.forEach { arr.put(it) }
         result.put("chapters", arr)
         return result.toString()
+    }
+
+    private data class ChapterImage(val chapter: Int, val index: Int, val isPng: Boolean, val fileName: String)
+
+    private val chapterImageRegex = Regex("""(?i)^chapter_(\d+)_img_(\d+)\.(png|jpe?g)$""")
+
+    private fun scanChapterImages(): List<ChapterImage> {
+        val folder = libraryFolder() ?: return emptyList()
+        return folder.listFiles()
+            .mapNotNull { it.name }
+            .mapNotNull { name ->
+                chapterImageRegex.find(name)?.let { m ->
+                    ChapterImage(
+                        chapter = m.groupValues[1].toInt(),
+                        index = m.groupValues[2].toInt(),
+                        isPng = m.groupValues[3].equals("png", ignoreCase = true),
+                        fileName = name
+                    )
+                }
+            }
+    }
+
+    /**
+     * Resolves the ordered list of "zen mode" side-image filenames for
+     * [currentChapter]. PNG wins over JPG/JPEG for the same chapter+index;
+     * walks backward from currentChapter to find the nearest chapter (<=
+     * current) with any images at all ("source chapter"). If the source
+     * IS the current chapter, returns its entire sorted image set (the JS
+     * side rotates through them across playback); if it's an EARLIER
+     * chapter, returns only that chapter's last (highest-index) image,
+     * statically. An empty result means no chapter from 1 up to the
+     * current one has any images - the JS side falls back to the existing
+     * /internal-cover/ ID3 art in that case.
+     */
+    private fun resolveChapterImagesJson(currentChapter: Int): String {
+        val byChapter = scanChapterImages().groupBy { it.chapter }
+        var sourceChapter: Int? = null
+        for (c in currentChapter downTo 1) {
+            if (byChapter.containsKey(c)) {
+                sourceChapter = c
+                break
+            }
+        }
+
+        val arr = JSONArray()
+        if (sourceChapter != null) {
+            val imagesForChapter = byChapter.getValue(sourceChapter)
+                .groupBy { it.index }
+                .mapValues { (_, dupes) -> dupes.sortedByDescending { it.isPng }.first().fileName }
+                .toSortedMap()
+            if (sourceChapter == currentChapter) {
+                imagesForChapter.values.forEach { arr.put(it) }
+            } else {
+                arr.put(imagesForChapter.values.last())
+            }
+        }
+        return JSONObject().apply { put("images", arr) }.toString()
+    }
+
+    private fun serveChapterImage(url: Uri): WebResourceResponse {
+        val fileName = url.path!!.removePrefix(CHAPTER_IMAGE_PATH_PREFIX)
+        val folder = libraryFolder() ?: return notFound()
+        val doc = folder.listFiles().firstOrNull { it.name == fileName } ?: return notFound()
+        val mime = if (fileName.endsWith(".png", ignoreCase = true)) "image/png" else "image/jpeg"
+        val stream = contentResolver.openInputStream(doc.uri) ?: return notFound()
+        return WebResourceResponse(mime, null, 200, "OK", emptyMap(), stream)
     }
 
     private fun readTextFileFromFolder(fileName: String): String? {
@@ -582,9 +657,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun chapterNumberFromBase(baseName: String): Int? =
+        Regex("""(\d+)$""").find(baseName)?.groupValues?.get(1)?.toIntOrNull()
+
     private fun humanizeChapterName(baseName: String): String {
-        val m = Regex("""(\d+)$""").find(baseName)
-        return if (m != null) "Chapter " + m.groupValues[1].toInt() else baseName
+        val n = chapterNumberFromBase(baseName)
+        return if (n != null) "Chapter $n" else baseName
     }
 
     /**
@@ -865,6 +943,40 @@ class MainActivity : ComponentActivity() {
         @JavascriptInterface
         fun deleteBookmark(id: String) {
             deleteBookmarkRecord(id)
+        }
+
+        // Global (not per-book) setting - which text-reveal preset is active.
+        @JavascriptInterface
+        fun getTextPreset(): String = getPrefs().getString(KEY_TEXT_PRESET, "A") ?: "A"
+
+        @JavascriptInterface
+        fun setTextPreset(preset: String) {
+            getPrefs().edit().putString(KEY_TEXT_PRESET, preset).apply()
+        }
+
+        // Hides/shows the status + nav bars for zen mode's fullscreen feel -
+        // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE keeps them swipe-revealable
+        // (rather than a swipe permanently exiting immersive mode), matching
+        // standard Android fullscreen-video conventions. Called from the JS
+        // side's applyZenState() whenever the .zen class toggles.
+        @JavascriptInterface
+        fun setImmersiveMode(enabled: Boolean) {
+            runOnUiThread {
+                if (enabled) {
+                    insetsController.systemBarsBehavior =
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    insetsController.hide(WindowInsetsCompat.Type.systemBars())
+                } else {
+                    insetsController.show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun resolveChapterImages(chapterBase: String): String {
+            val chapterNum = chapterNumberFromBase(chapterBase)
+                ?: return JSONObject().apply { put("images", JSONArray()) }.toString()
+            return resolveChapterImagesJson(chapterNum)
         }
     }
 }

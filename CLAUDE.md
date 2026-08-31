@@ -24,8 +24,19 @@ Context handoff for Claude Code, continuing work started in Claude Desktop
   - `c07cd23` — bottom-bar rework: author on top / book title on bottom
     (each row sizes independently against its own pill instead of sharing
     one column across both rows)
-  - (pending) — real chapter-number-based progress counter + persisted
-    resume position + named/dated bookmarks, see below
+  - `401849c` — real chapter-number-based progress counter + persisted
+    resume position + named/dated bookmarks
+  - `9da716b`/`de0afc0`/`9c8fc26`/`971ff88`/`ef05573` — README rewrite,
+    copyright/content disclaimer, and the app icon's history (added, then
+    purged from git history entirely and gitignored - personal photo not
+    yet cleared for public redistribution, see the "Local-only app icon"
+    section near the end of this file)
+  - Branch `preset-text-animation` (not yet merged to `main`) — visible
+    library/bookmark/text-preset icon buttons (replicating the Windows
+    sibling app's layout, see below), a second text-reveal preset (fade
+    instead of color-sweep), and a new orientation-triggered "Zen mode"
+    reading layout with a per-chapter side image - see the Structure
+    section below for how each piece works
 - Treat "Current status" and "Priority testing checklist" below as the
   source of truth for what actually works, independent of what git tracks
   — update both as things get confirmed or change.
@@ -172,6 +183,97 @@ working via direct on-device testing, not just "written."
     `onAudioPrepareReady` to seek there instead of starting from 0 — reuses
     the same `seekToTime()` primitive as drag-to-seek/next/prev/lock-screen
     scrubbing.
+  - **`preset-text-animation` branch** (ported from the Windows sibling
+    app's `text-animation-preset` branch, per `androidportspec.md`):
+    - Visible icon buttons — `#readerTopBar` (library + bookmark, top-left)
+      and `#presetToggleBtn` (あ glyph, top-right) — replicate the Windows
+      app's overlay row exactly (same 36px circular `.iconBtn`, same
+      `top:16px`/`left:16px`/`right:16px` positions), as a *second*, visible
+      entry point alongside the existing gestures (triple-tap/swipe-up),
+      which still work unchanged. They're DOM siblings of `#frame`, not
+      descendants — `#frame`'s gesture listeners classify taps/swipes by
+      coordinate math with no `stopPropagation()` anywhere in this file, so
+      a button nested inside it would have its clicks misread as gestures.
+      `#frame`'s padding is `64px 26px 26px` normally (dropping to zen
+      mode's own, unrelated padding scheme — see below — once the icons
+      are hidden) specifically to clear these icons — the JS constants
+      `PAD_X`/`PAD_TOP`/`PAD_BOTTOM` in `getAvailableSpace()` must stay
+      numerically in sync with the CSS, since that function (not just the
+      CSS) is what actually guarantees text can't render underneath the
+      icons.
+    - Text is Yu Mincho (`"Yu Mincho","YuMincho","游明朝","Hiragino Mincho
+      ProN","MS Mincho",serif` — same fallback stack as the Windows app,
+      set on both `#pageText` and `#measure` so the font-fit math measures
+      against what actually renders) on `#d6d6d6` light grey — both presets
+      share this same base/unread color now, matching Windows exactly.
+    - Text preset A (color sweep, pre-existing) vs B (fade reveal, new) —
+      `textPreset` is a global (not per-book) setting via
+      `Android.getTextPreset()`/`setTextPreset()`. `applyInitialSpanState()`
+      and `updateChunkHighlight()` both branch on it; toggling
+      (`#presetToggleBtn`) re-applies to the *currently shown* chunk
+      immediately via the same two functions, without rebuilding spans via
+      `showPage()`. **Watch for this bug class if you touch either
+      preset's code again**: switching presets rewrites `.style.color`
+      *and* `.style.opacity` per span — clearing only one of the two when
+      switching back leaves stale styling from whichever preset was active
+      before (this bit us once already: A→B→A left B's grey color stuck on
+      not-yet-lit spans until `applyInitialSpanState()`'s A branch was
+      fixed to clear color for every span, not just the lit ones).
+    - **Zen mode** — distraction-free layout (only vertical text + a
+      per-chapter side image), entered by *physically rotating the phone to
+      landscape* (`zenMql = matchMedia('(orientation: landscape)')`), not a
+      manual toggle — the Activity has no `android:screenOrientation` lock,
+      so it's already free to rotate, and the OS's own rotation pipeline
+      already refuses to rotate at all when the user has rotation-lock on —
+      so "never trigger zen mode when locked" is automatic, with zero raw
+      `SensorManager` code. `applyZenState()` toggles a `.zen` class on
+      `#readerScreen`; CSS hides the icon row/progress bar/meta row and
+      switches `#frame` to `justify-content:flex-end` (right-anchored, not
+      centered — leftover width collects on the left, the natural side for
+      right-to-left vertical Japanese text). Zen's padding, revised once
+      more after on-device testing showed content flush against the true
+      screen edges once the status/nav bars also hide (see immersive-mode
+      note below) felt too tight: `#frame { padding:1vh 2vw 1vh 1vw;
+      gap:2vw; }` — 1% of screen *height* top+bottom, 2% of screen
+      *width* for the image's own buffer from the true right screen edge,
+      1% of screen width for the text block's buffer from the true left
+      screen edge (unchanged from the previous pass), and a 2%-of-width
+      gap between text and image (up from 1%). All four numbers are kept
+      numerically in sync with `ZEN_TOP_BOTTOM_FRACTION`/
+      `ZEN_RIGHT_FRACTION`/`ZEN_LEFT_FRACTION`/`ZEN_GAP_FRACTION` in the
+      script. This is the second revision of this scheme — an even more
+      aggressive zero-padding-except-1%-left version came first, then
+      got walked back once hiding the system bars made that feel too
+      tight; a `2vh`/`26px`/`3vw` scheme came before that, which wasted
+      too much of a tall/narrow 20:9 screen. `getAvailableSpace()` sizes
+      the side image to the row height *after* subtracting the top+bottom
+      padding (no more 85% rule), then gives the text whatever's left
+      after the image + the gap + the right buffer. Feather/vignette is a
+      `mask-image`/`-webkit-mask-image` with two independent linear
+      gradients (one per axis, `intersect`/`source-in` composited) for a
+      rectangular fade with sharp corners, not an oval vignette.
+      Status/nav bars hide on entering zen mode and reappear on leaving it
+      or returning to the library — `applyZenState()` calls a new bridge
+      method, `Android.setImmersiveMode(enabled)`
+      (`MainActivity.kt`'s `LibraryBridge`), which drives the existing
+      `insetsController` (promoted from an `onCreate`-local `val` to a
+      class property so this method can reach it) via
+      `WindowInsetsControllerCompat.hide/show(WindowInsetsCompat.Type.systemBars())`,
+      with `BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE` so a swipe-in still
+      reveals them temporarily rather than permanently exiting immersive
+      mode. `goToLibrary()` also calls it with `false` unconditionally, so
+      leaving the reader screen can't strand the bars hidden.
+      Per-chapter image resolution (`chapter_<N>_img_<index>.(png|jpe?g)`
+      files living alongside the chapter audio in the SAF folder — PNG
+      wins ties, walks backward to the nearest chapter with any images,
+      rotates through a chapter's own image set across its playback time,
+      falls back to the existing ID3 cover art if nothing's found from
+      chapter 1 up to the current one) is native
+      (`resolveChapterImages`/`/internal-chapter-image/` in
+      `MainActivity.kt`, modeled on the existing chapter-file-listing and
+      `/internal-cover/` patterns) — nothing here needed a new Android
+      permission (no `INTERNET`, no sensors), it's pure local SAF file
+      access plus riding the OS's existing rotation behavior.
 
 ## Build setup
 
@@ -248,6 +350,44 @@ and its fix).
    exact saved time; confirm a bookmark/last-position pointing at a
    chapter file since deleted from the folder falls through gracefully to
    the existing "could not prepare audio" alert rather than crashing.
+8. **`preset-text-animation` branch** (new, built 2026-08-28/29 on that
+   branch, not yet merged to `main` — functionally verified in-browser
+   with a mocked bridge, including the orientation trigger by resizing an
+   actual desktop browser window across the aspect-ratio threshold, and
+   passes a full `:app:assembleDebug`, but never run on a device):
+   - Library/bookmark/preset-toggle icon buttons show up, don't overlap
+     the vertical text (check especially with a very short chunk, where
+     the text column is short enough that the top-padding buffer matters
+     visually), and each does the same thing its existing gesture does.
+   - Toggling the あ icon switches between color-sweep and fade-reveal
+     immediately, persists across a full app restart (global setting, not
+     per-book), and doesn't leave stale styling behind after a few
+     back-and-forth toggles mid-chunk.
+   - **Rotate to landscape with rotation-lock off** → zen mode engages:
+     chrome hides, layout is right-anchored with the image inset 1%
+     (height) top/bottom and 2% (width) from the true right screen edge,
+     text inset 1% (width) from the true left edge, a 2%-width gap
+     between them, and rectangular feather looking right, gestures
+     (tap/edge-swipe/
+     swipe-up-bookmark) still work with `#frame`'s touchable area now
+     mostly empty space left of the packed text+image. **Rotate with
+     rotation-lock on** → zen mode must never engage — this is the one
+     piece of reasoning (relying on the OS's own rotation pipeline rather
+     than a raw sensor) that's architecturally sound but has not been
+     confirmed against real OEM WebView behavior on an actual device.
+   - Also check the status/nav bars actually hide on entering zen and
+     reappear on exiting it or triple-tapping back to the library — new,
+     built 2026-08-31, only compile-verified so far.
+   - A real folder with `chapter_<N>_img_<index>` files across more than
+     one chapter, to see the backward-search (chapters with no images of
+     their own falling back to an earlier chapter's last image, static)
+     and same-chapter rotation-across-playback-time behavior on real
+     content — this session's testing could only verify the resolution
+     *logic* with a mocked bridge, not real image bytes rendering.
+   - Known, accepted limitation carried over from the porting spec: an
+     extremely long chunk in zen mode could in principle still push text
+     past the left screen edge (no hard font-size floor) — not fixed in
+     this pass, matching the spec's own "not necessarily fixing in v1" note.
 
 ## Known gaps
 
@@ -255,6 +395,23 @@ and its fix).
   the SAF folder per request (this superseded the original
   Range-streaming-from-SAF design before Phase 4 was ever committed) —
   fine at one-book scale, worth revisiting if it ever feels slow.
+
+## Local-only app icon (not in git, don't try to "fix" this)
+
+`AndroidManifest.xml` on this machine has `android:icon`/`android:roundIcon`
+pointing at `@mipmap/ic_launcher`, and `icon.jpg` + the `mipmap-*/
+ic_launcher.png` files exist on disk — but none of that is tracked. The
+icon is a personal photo not cleared for public redistribution (purged
+from git history entirely earlier), the image files are `.gitignore`d,
+and the manifest is marked `git update-index --skip-worktree` so this
+local edit can never show up in `git status` or get picked up by a
+commit. `git log`/`git diff` on the manifest will look clean even though
+the working copy differs from what's committed — that's expected, not a
+bug. If the manifest ever needs a *real* shared edit (a new permission,
+etc.), run `git update-index --no-skip-worktree
+app/src/main/AndroidManifest.xml` first, make the edit, commit, then
+re-apply the icon lines and re-mark it skip-worktree — otherwise the
+edit will silently never be tracked.
 
 ## Working style (carried over from Desktop/Cowork sessions)
 

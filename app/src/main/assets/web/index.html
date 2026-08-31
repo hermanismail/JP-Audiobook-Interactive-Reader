@@ -19,13 +19,76 @@
     background:#7a3030; color:#fff; font-size:13px; }
   #emptyMsg { color:#9a97a0; font-size:14px; margin-bottom:16px; }
 
-  #readerScreen { display:none; height:100%; box-sizing:border-box; flex-direction:column; padding:16px; gap:10px; touch-action:none; }
+  #readerScreen { display:none; position:relative; height:100%; box-sizing:border-box; flex-direction:column; padding:16px; gap:10px; touch-action:none; }
 
-  #frame { flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:26px; box-sizing:border-box; }
-  #pageText { writing-mode:vertical-rl; height:100%; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:#c9bdfa; overflow-wrap:anywhere; }
-  #pageText span { transition:color 0.2s ease; }
-  #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; white-space:normal; overflow-wrap:anywhere; }
+  #readerTopBar { position:absolute; top:16px; left:16px; z-index:5; display:flex; gap:8px; }
+  .iconBtn { width:36px; height:36px; border-radius:50%; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; display:flex; align-items:center; justify-content:center; padding:0; }
+  /* Same protected top zone as #readerTopBar (#frame's 64px top padding
+     below runs the full width of the frame, not just under the left
+     icons) - just anchored to the right edge instead. */
+  #presetToggleBtn { position:absolute; top:16px; right:16px; z-index:5; font-size:16px; font-weight:500; }
+  #presetToggleBtn.active { border-color:#e08a3c; color:#e08a3c; }
+
+  /* Extra top padding (vs 26px on the other three sides) clears
+     #readerTopBar/#presetToggleBtn's icon buttons (top:16px + 36px tall =
+     52px from the screen edge, plus a little breathing room) - otherwise
+     the top-most column of vertical text would render right underneath
+     them. Keep in sync with PAD_TOP/PAD_X in the script below, which need
+     the same numbers for the text-fit math. Drops to 2vh/26px in zen mode
+     (see the .zen rule further down), since there are no icons left to
+     clear once they're hidden. */
+  #frame { flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:64px 26px 26px; box-sizing:border-box; }
+  #pageText { writing-mode:vertical-rl; height:100%; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:#d6d6d6; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; overflow-wrap:anywhere; }
+  #pageText span { transition:color 0.2s ease, opacity 0.15s linear; }
+  #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; white-space:normal; overflow-wrap:anywhere; }
   #loadingOverlay { display:none; color:#9b93b0; font-size:14px; text-align:center; }
+
+  /* Zen mode: distraction-free layout, entered by physically rotating to
+     landscape (see zenMql below) - everything but the vertical text and a
+     per-chapter side image hides, matching the Windows sibling app. */
+  #readerScreen.zen #readerTopBar,
+  #readerScreen.zen #presetToggleBtn,
+  #readerScreen.zen #timeRow,
+  #readerScreen.zen #progressTrack,
+  #readerScreen.zen #metaRow { display:none; }
+  /* Top/bottom padding is 1vh each (1% of screen height) - now that zen
+     mode also hides the status/nav bars (see Android.setImmersiveMode),
+     a true zero here put text/image flush against the physical screen
+     edge, which read as too tight. Right padding is 2vw (image's own
+     buffer from the true right screen edge); left stays 1vw (text's
+     buffer from the true left screen edge, unchanged). The flex gap
+     (text-to-image spacing) is 2vw, up from the previous 1vw - all four
+     numbers kept in sync with ZEN_TOP_BOTTOM_FRACTION/
+     ZEN_RIGHT_FRACTION/ZEN_LEFT_FRACTION/ZEN_GAP_FRACTION in the script
+     below. */
+  #readerScreen.zen #frame { padding:1vh 2vw 1vh 1vw; gap:2vw; }
+
+  /* Right-anchored, not centered: switches #frame's justify-content from
+     the normal mode's center to flex-end, so the [text, image] pair packs
+     against the right edge and any leftover width collects on the left -
+     the natural side for right-to-left vertical Japanese text, rather
+     than splitting evenly on both sides regardless of the image's aspect
+     ratio. #zenImageWrap is #pageText's sibling, appearing after it in
+     DOM order, so it's the one flex-end actually pins to the right - see
+     the JS comment on getAvailableSpace() for why the image (not the
+     text) is the fixed point chunk-to-chunk. */
+  #readerScreen.zen #frame { justify-content:flex-end; }
+  #zenImageWrap { display:none; align-items:center; }
+  #zenImage {
+    height:100%; width:auto; border-radius:8px;
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+  }
 
   #bookmarkToast { position:fixed; left:50%; top:16px; transform:translateX(-50%);
     background:#17161a; border:1px solid #3a3840; color:#e8e6ea; padding:8px 16px;
@@ -48,7 +111,10 @@
      shared text column + shared pill column across both rows), so a
      narrower pill (speed) lets its row's text run wider than a row stuck
      next to a wider pill (chapter/progress). */
-  #metaCol { flex:1; min-width:0; display:flex; flex-direction:column; justify-content:space-between; }
+  /* Explicit row gap (not justify-content:space-between) so the buffer
+     between pills can't collapse if pill height ever changes - 24px pill
+     + 8px gap + 24px pill = 56px, matching the cover art's height exactly. */
+  #metaCol { flex:1; min-width:0; display:flex; flex-direction:column; gap:8px; }
   .metaLine { display:flex; align-items:center; gap:10px; }
   #chapterTitle { flex:1; min-width:0; font-size:16px; font-weight:600; color:#e8e6ea; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .marqueeBox { flex:1; min-width:0; overflow:hidden; white-space:nowrap; font-size:12px; color:#9b93b0; }
@@ -57,7 +123,9 @@
   .marqueeBox.scrolling .marqueeInner { animation-name: marqueeScroll; animation-timing-function: linear; animation-iteration-count: infinite; }
   @keyframes marqueeScroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
-  .pill { flex-shrink:0; display:flex; align-items:center; gap:6px; padding:6px 12px; border-radius:999px; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; font-size:12px; white-space:nowrap; }
+  /* Fixed height (not padding-driven) so chapterPill/speedPill render at
+     identical heights regardless of their differing content. */
+  .pill { flex-shrink:0; display:flex; align-items:center; gap:6px; height:24px; box-sizing:border-box; padding:0 12px; border-radius:999px; border:1px solid #3a3840; background:#17161a; color:#e8e6ea; font-size:12px; white-space:nowrap; }
   .pill svg { flex-shrink:0; }
 
   #speedOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); align-items:center; justify-content:center; z-index:10; touch-action:none; }
@@ -79,10 +147,21 @@
 </div>
 
 <div id="readerScreen">
+  <div id="readerTopBar">
+    <button id="libraryBtn" class="iconBtn" aria-label="Back to library">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></svg>
+    </button>
+    <button id="bookmarkBtn" class="iconBtn" aria-label="Bookmark this spot">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4V3z"/></svg>
+    </button>
+  </div>
+  <button id="presetToggleBtn" class="iconBtn" aria-label="Toggle text animation preset">あ</button>
+
   <div id="frame">
     <div id="pageText"></div>
     <div id="loadingOverlay">Preparing chapter&hellip; <span id="loadingPercent">0</span>%</div>
     <div id="measure"></div>
+    <div id="zenImageWrap"><img id="zenImage"></div>
   </div>
 
   <div id="bookmarkToast"></div>
@@ -155,6 +234,11 @@
   var loadingOverlay = document.getElementById('loadingOverlay');
   var loadingPercent = document.getElementById('loadingPercent');
   var bookmarkToast = document.getElementById('bookmarkToast');
+  var libraryBtn = document.getElementById('libraryBtn');
+  var bookmarkBtn = document.getElementById('bookmarkBtn');
+  var presetToggleBtn = document.getElementById('presetToggleBtn');
+  var zenImageWrap = document.getElementById('zenImageWrap');
+  var zenImage = document.getElementById('zenImage');
 
   var elapsedLabel = document.getElementById('elapsedLabel');
   var totalLabel = document.getElementById('totalLabel');
@@ -192,7 +276,20 @@
   var scrubbing = false;
   var chunkSpans = [];
   var chunkLitCount = 0;
-  var PAD = 26, MAX_F = 68, ABS_MIN = 10;
+  var PAD_X = 26, PAD_TOP = 64, PAD_BOTTOM = 26, MAX_F = 68, ABS_MIN = 10;
+  // Zen mode's padding, once the status/nav bars also hide (see
+  // Android.setImmersiveMode): 1% of screen height top+bottom, 2% of
+  // screen width for the image's own buffer from the true right screen
+  // edge, 1% of screen width for the text block's buffer from the true
+  // left screen edge, and a 2%-of-width gap between text and image.
+  var ZEN_TOP_BOTTOM_FRACTION = 0.01;
+  var ZEN_LEFT_FRACTION = 0.01;
+  var ZEN_RIGHT_FRACTION = 0.02;
+  var ZEN_GAP_FRACTION = 0.02;
+
+  var zenActive = false;
+  var zenImageList = [];
+  var zenCurrentImageUrl = null;
 
   function chapterNumber(base){
     var m = base.match(/(\d+)$/);
@@ -387,6 +484,7 @@
     readerScreen.style.display = 'none';
     libraryScreen.style.display = 'block';
     Android.stopPlaybackSession();
+    try { Android.setImmersiveMode(false); } catch(e){}
   }
 
   function openChapter(base, resumeSeconds){
@@ -436,6 +534,20 @@
     loadingOverlay.style.display = 'none';
     pageText.style.display = 'flex';
 
+    // Metadata/zen-images resolved BEFORE the first updateForTime() call
+    // below (not after, despite matching the original call order more
+    // closely) - updateForTime() is what actually shows the zen image via
+    // updateZenImageForTime(), and it needs coverArt.src (the ID3-cover
+    // fallback) and zenImageList already in place on its very first tick,
+    // not one tick later.
+    var meta = {};
+    try { meta = JSON.parse(metadataJson || '{}'); } catch(e){}
+    applyMetadata(meta);
+    loadZenImagesForChapter(base);
+    // If the phone's already physically landscape, start directly in zen
+    // mode rather than requiring an extra rotation round-trip.
+    applyZenState();
+
     var resumeSeconds = pendingResumeSeconds;
     pendingResumeSeconds = null;
 
@@ -453,10 +565,6 @@
       updateForTime(0);
       audio.play().catch(function(e){ console.log('autoplay failed: ' + e); });
     }
-
-    var meta = {};
-    try { meta = JSON.parse(metadataJson || '{}'); } catch(e){}
-    applyMetadata(meta);
   };
 
   window.onAudioPrepareFailed = function(base, reason){
@@ -541,7 +649,7 @@
       return (n !== null && n > max) ? n : max;
     }, 0);
     var chunkPos = idx >= 0 ? (idx + 1) : 0;
-    chapterPill.textContent = 'Chapter ' + chapterIndex + '/' + chapterTotal + '   progress ' + chunkPos + '/' + chunks.length;
+    chapterPill.textContent = 'Chapter: ' + chapterIndex + '/' + chapterTotal + ' Part: ' + chunkPos + '/' + chunks.length;
   }
 
   function fitFontSize(text, availW, availH){
@@ -554,11 +662,51 @@
     return ABS_MIN;
   }
 
+  // Outside zen mode (or zen with no image resolved for this chapter -
+  // e.g. no folder images and no ID3 cover either): same math as before,
+  // just the asymmetric top padding that clears the icon buttons. In zen
+  // mode with an image showing, the image's rendered width has to be
+  // known BEFORE the text's available width can be computed (fitFontSize
+  // needs a concrete target width to choose a font size against, same
+  // chicken-and-egg problem this function already solved for the normal
+  // case) - so the image is sized first (full row height - no top/bottom
+  // padding left in zen mode - aspect ratio preserved via width:auto),
+  // then whatever's left after its rendered width + the 1vw gap becomes
+  // the text's budget. The image is the fixed point here, not the text: text width changes every
+  // single chunk (different chunk wraps into a different number of
+  // vertical columns at a given font size) - anchoring layout to the text
+  // would make the image visibly shift on every page turn, so the image
+  // holds still and the text absorbs the per-chunk width changes instead.
+  function getAvailableSpace(){
+    if (!zenActive || zenImageWrap.style.display === 'none') {
+      return {
+        w: frame.clientWidth - PAD_X * 2,
+        h: frame.clientHeight - PAD_TOP - PAD_BOTTOM
+      };
+    }
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var leftPad = vw * ZEN_LEFT_FRACTION;
+    var rightPad = vw * ZEN_RIGHT_FRACTION;
+    var topBottomPad = vh * ZEN_TOP_BOTTOM_FRACTION;
+    var gapW = vw * ZEN_GAP_FRACTION;
+    var innerW = frame.clientWidth - leftPad - rightPad;
+    var imgH = frame.clientHeight - topBottomPad * 2;
+    zenImage.style.height = imgH + 'px';
+    zenImage.style.width = 'auto';
+    var imgW = zenImage.getBoundingClientRect().width;
+    var textW = innerW - imgW - gapW;
+    return { w: Math.max(40, textW), h: imgH };
+  }
+
   function showPage(i){
     var chunk = chunks[i];
-    var availW = frame.clientWidth - PAD * 2;
-    var availH = frame.clientHeight - PAD * 2;
-    var f = fitFontSize(chunk.text, availW, availH);
+    var space = getAvailableSpace();
+    var f = fitFontSize(chunk.text, space.w, space.h);
+    // Text block's height is synced to the zen image's rendered height so
+    // their top/bottom edges align (spec: "vertically centered as a
+    // pair"); '' outside zen falls back to the normal CSS height:100% rule.
+    pageText.style.height = (zenActive && zenImageWrap.style.display !== 'none') ? (space.h + 'px') : '';
     pageText.style.opacity = '0';
     pageText.style.fontSize = f + 'px';
 
@@ -591,7 +739,7 @@
     // progress to reach them - matches the natural lead-in beat of the
     // narration for those first couple of characters.
     chunkLitCount = Math.min(PRELIT_COUNT, chunkSpans.length);
-    for (var p = 0; p < chunkLitCount; p++) chunkSpans[p].style.color = HIGHLIGHT_COLOR;
+    applyInitialSpanState();
 
     requestAnimationFrame(function(){ pageText.style.opacity = '1'; });
   }
@@ -601,6 +749,78 @@
     pageText.innerHTML = '';
     chunkSpans = [];
     chunkLitCount = 0;
+  }
+
+  // --- Zen mode: distraction-free layout entered by physically rotating
+  // to landscape (like a video player going fullscreen), not a manual
+  // toggle. Rides Android's own rotation pipeline via matchMedia rather
+  // than a raw sensor - the Activity has no android:screenOrientation
+  // lock, so it's already free to rotate, and the OS already refuses to
+  // rotate at all when the user has rotation-lock on - so "never trigger
+  // zen mode when locked" comes for free with zero native code, exactly
+  // mirroring how fullscreen-on-rotate actually works in most apps.
+  var zenMql = window.matchMedia('(orientation: landscape)');
+
+  function applyZenState(){
+    if (readerScreen.style.display !== 'flex') return; // only while a chapter's open
+    var next = zenMql.matches;
+    if (next === zenActive) return;
+    zenActive = next;
+    readerScreen.classList.toggle('zen', zenActive);
+    try { Android.setImmersiveMode(zenActive); } catch(e){}
+    if (shown && idx >= 0) showPage(idx);
+    updateZenImageForTime((audio.currentTime || 0) + chapterTimeOffset);
+  }
+
+  if (zenMql.addEventListener) zenMql.addEventListener('change', applyZenState);
+  else zenMql.addListener(applyZenState); // older WebView fallback
+  // Belt-and-suspenders: some OEM WebViews may fire resize before (or
+  // instead of) the matchMedia change event on rotation.
+  window.addEventListener('resize', applyZenState);
+
+  // Resolves the ordered side-image list for the chapter just opened -
+  // see MainActivity.resolveChapterImagesJson() for the actual
+  // backward-search/rotation-set logic; this just fetches and stores the
+  // result. An empty list means "no images from chapter 1 up to this one"
+  // - updateZenImageForTime() falls back to the existing ID3 cover art
+  // in that case, same image already shown in the normal (non-zen) UI.
+  function loadZenImagesForChapter(base){
+    zenImageList = [];
+    zenCurrentImageUrl = null;
+    try {
+      var res = JSON.parse(Android.resolveChapterImages(base) || '{}');
+      (res.images || []).forEach(function(name){
+        zenImageList.push('https://appassets.androidplatform.net/internal-chapter-image/' + name);
+      });
+    } catch(e){}
+  }
+
+  // A chapter's own N images divide its duration into N equal segments,
+  // switching evenly - a 1-image list (the "earlier chapter, static"
+  // case from the resolution algorithm) naturally never changes segment,
+  // so no special-casing is needed for it beyond the fully-empty case.
+  function updateZenImageForTime(t){
+    var url = null;
+    if (zenImageList.length === 0) {
+      url = (coverArt.style.display !== 'none' && coverArt.src) ? coverArt.src : null;
+    } else if (zenImageList.length === 1) {
+      url = zenImageList[0];
+    } else {
+      var frac = chapterDuration > 0 ? Math.min(0.999999, t / chapterDuration) : 0;
+      var segment = Math.max(0, Math.min(zenImageList.length - 1, Math.floor(frac * zenImageList.length)));
+      url = zenImageList[segment];
+    }
+    if (url && url !== zenCurrentImageUrl) {
+      zenCurrentImageUrl = url;
+      zenImage.src = url;
+    }
+    var shouldShow = zenActive && !!url;
+    if (shouldShow !== (zenImageWrap.style.display === 'flex')) {
+      zenImageWrap.style.display = shouldShow ? 'flex' : 'none';
+      // The image's presence/absence changes how much width the text
+      // gets (see getAvailableSpace()) - re-fit the current page against it.
+      if (shown && idx >= 0) showPage(idx);
+    }
   }
 
   // Recolors characters left-to-right as the chunk's own playback
@@ -614,8 +834,34 @@
   // before the chunk's own end timestamp, so waiting for true 100% often
   // meant the last couple of characters never visibly caught up.
   var HIGHLIGHT_COLOR = '#F6CAC0';
+  var FADE_BASE_COLOR = '#d6d6d6';
   var PRELIT_COUNT = 2;
   var COMPLETE_AT_FRACTION = 0.95;
+
+  // 'A' = color sweep (discrete per-character flip, the original/default
+  // behavior above); 'B' = fade reveal (opacity ramps continuously per
+  // character instead of the color ever changing). Global app setting,
+  // not scoped per book - read once at launch, written on every toggle.
+  var textPreset = 'A';
+  try { textPreset = Android.getTextPreset() || 'A'; } catch(e){}
+
+  // Sets each span's starting look for whichever preset is currently
+  // active - called once per fresh chunk (showPage) and again immediately
+  // on a mid-chunk preset toggle (setTextPreset below).
+  function applyInitialSpanState(){
+    var i;
+    if (textPreset === 'B') {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.color = FADE_BASE_COLOR;
+        chunkSpans[i].style.opacity = (i < PRELIT_COUNT) ? '1' : '0';
+      }
+    } else {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.opacity = '';
+        chunkSpans[i].style.color = (i < chunkLitCount) ? HIGHLIGHT_COLOR : '';
+      }
+    }
+  }
 
   function updateChunkHighlight(t, chunk){
     if (!shown || chunkSpans.length === 0) return;
@@ -624,16 +870,41 @@
     frac = Math.max(0, Math.min(1, frac));
     var adjustedFrac = Math.min(1, frac / COMPLETE_AT_FRACTION);
     var remaining = Math.max(0, chunkSpans.length - PRELIT_COUNT);
+
+    if (textPreset === 'B') {
+      var continuous = adjustedFrac * remaining;
+      for (var i = 0; i < remaining; i++) {
+        chunkSpans[PRELIT_COUNT + i].style.opacity = Math.max(0, Math.min(1, continuous - i));
+      }
+      return;
+    }
+
     var litCount = Math.min(chunkSpans.length, PRELIT_COUNT + Math.floor(adjustedFrac * remaining));
     if (litCount === chunkLitCount) return;
-    var i;
+    var j;
     if (litCount > chunkLitCount) {
-      for (i = chunkLitCount; i < litCount; i++) chunkSpans[i].style.color = HIGHLIGHT_COLOR;
+      for (j = chunkLitCount; j < litCount; j++) chunkSpans[j].style.color = HIGHLIGHT_COLOR;
     } else {
-      for (i = litCount; i < chunkLitCount; i++) chunkSpans[i].style.color = '';
+      for (j = litCount; j < chunkLitCount; j++) chunkSpans[j].style.color = '';
     }
     chunkLitCount = litCount;
   }
+
+  function setTextPreset(preset){
+    if (preset !== 'A' && preset !== 'B') return;
+    textPreset = preset;
+    try { Android.setTextPreset(preset); } catch(e){}
+    presetToggleBtn.classList.toggle('active', preset === 'B');
+    if (shown && chunkSpans.length) {
+      applyInitialSpanState();
+      updateChunkHighlight((audio.currentTime || 0) + chapterTimeOffset, chunks[idx]);
+    }
+  }
+
+  presetToggleBtn.classList.toggle('active', textPreset === 'B');
+  presetToggleBtn.addEventListener('click', function(){
+    setTextPreset(textPreset === 'A' ? 'B' : 'A');
+  });
 
   function currentChunkIndex(t){
     var i = 0;
@@ -671,6 +942,7 @@
     }
 
     updateChunkHighlight(t, chunk);
+    updateZenImageForTime(t);
   }
 
   function bufferedRangesString(){
@@ -911,6 +1183,12 @@
     speedSlider.value = v;
     reportPlaybackState(true);
   }
+
+  // Visible second entry point for the same two actions the existing
+  // gestures already do (triple-tap / swipe-up) - matches the Windows
+  // sibling app's icon row. Gestures keep working unchanged.
+  libraryBtn.addEventListener('click', goToLibrary);
+  bookmarkBtn.addEventListener('click', saveBookmarkGesture);
 
   speedPill.addEventListener('click', function(){
     speedOverlay.style.display = (speedOverlay.style.display === 'flex') ? 'none' : 'flex';
