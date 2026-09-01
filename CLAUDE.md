@@ -980,11 +980,190 @@ plan; this section is the load-bearing summary.
       making `.iconBtn` declare `box-sizing:border-box` explicitly -
       harmless for the existing `<button>`-based icons, which already
       behaved that way by default.
-- **Not yet done**: the actual domain purchase + Cloudflare Tunnel/Access
-  setup (manual, on the user's end — `server/README.md` documents the
-  steps but doesn't automate them), and the two other roadmap pieces
-  explicitly deferred to build on top of this: a streaming-optimized
-  Android client, and TV casting (custom Google Cast receiver).
+  - **Screen Wake Lock** (`audio` `play`/`pause` listeners in
+    `index.html`) — real user report: the screen goes to sleep on
+    Android/iPad during playback, unlike the offline Android app (which
+    has its own native way of staying awake during playback that a
+    browser tab has no equivalent access to). Fixed with the Screen Wake
+    Lock API (`navigator.wakeLock.request('screen')` on `play`, released
+    on `pause`) — feature-detected and wrapped in try/catch so it's a
+    silent no-op wherever unsupported, never breaks playback either way.
+    Re-acquired on `visibilitychange` back to `visible` if audio is still
+    playing, since the browser auto-releases the lock whenever a tab is
+    hidden/backgrounded (per spec) — otherwise switching to another app
+    and back mid-chapter would silently lose the behavior for the rest of
+    the session. **Confirmed on real hardware**: a real-world test on a
+    Samsung Galaxy A52s (SM-A528B, Android 14, Chrome 152) still showed
+    the screen sleeping over plain LAN/Wi-Fi use - but re-tested over a
+    USB-debugging session (`chrome://inspect` from a desktop, phone
+    connected by cable) the screen correctly stayed awake. That split
+    result points at Samsung's own per-app battery/sleep management for
+    Chrome (a known category of issue on Samsung devices specifically -
+    they aggressively suspend background/idle web platform APIs unless
+    an app is battery-optimization-exempted or, apparently, unless USB
+    debugging is active) rather than a bug in this code - the Wake Lock
+    request/release logic itself is doing the right thing. Flagged to
+    revisit later (a Samsung-specific "disable battery optimization for
+    Chrome" instruction in the README, maybe) rather than chased further
+    now. Separately confirmed harmless on this sandbox's own preview pane,
+    which blocks the API outright via its Permissions-Policy
+    (`NotAllowedError`, same class of restriction as the Fullscreen API
+    note above) - the try/catch swallows it and playback is unaffected.
+    - **Follow-up bug found via the same real-device test**: at the
+      phone's actual 412px viewport width, a real chapter with a long
+      "Chapter: 15/16 Part: 111/164" pill string left the lone play/pause
+      button (already down to just itself via hide-chapter+hide-part)
+      visibly crowding the pill next to it - the middle grid column's
+      `minmax(36px, 1fr)` floor guarantees just enough room for the
+      button itself, with zero breathing space left over once the outer
+      columns are large. Fixed with a fourth, independent tier: a flat
+      `window.innerWidth < 450` check (`PLAYER_CONTROLS_MIN_VIEWPORT`,
+      a real device measurement, not derived from measuring content)
+      hides play/pause too below that width, applied unconditionally
+      alongside (not instead of) the existing content-fit checks for
+      hide-chapter/hide-part. Tap-anywhere-on-the-text-to-play/pause
+      keeps working regardless, since that's `#frame`'s own gesture
+      listener, untouched by this. Verified the exact boundary (449px
+      hides it, 450px shows it) plus the real 412px width.
+    - **Per-book library art pill overflowed its own border on the same
+      412px phone** (real screenshot from the user, not just an
+      inspected breakpoint): `.libraryBookPill`'s narrow-screen rule
+      forces the pill to `min(400px, 90vw)` - a shrunk *square* (370.8px
+      at 412px width) - but `.bookCover`/`.bookCoverPlaceholder` stays a
+      fixed 300x300 (sized for the ≥800px case, where the pill itself is
+      a fixed, roomier 400x400). At 370.8px, fitting a still-300px-tall
+      cover plus two text lines plus 32px of padding needs ~392px -
+      title and author visibly spilled out past the pill's rounded
+      border instead of being clipped or making the pill taller. Fixed
+      two ways together rather than tuning yet another magic threshold:
+      the pill's `height` switched from another `min(400px, 90vw)` to
+      `auto` (grows to fit whatever it actually contains), and the cover
+      itself switched to `width:100%; height:auto; aspect-ratio:1/1`
+      inside that same narrow-screen media query - scales down with the
+      pill instead of staying locked at 300px, and stays visually square
+      via the aspect-ratio rather than a hardcoded height. Scoped to only
+      `.libraryBookPill` inside the existing `@media (max-width:799px)`
+      block, so the ≥800px fixed-400x400/300x300 case (home grid pills,
+      and the wide per-book library layout) is completely untouched -
+      confirmed via `getBoundingClientRect()` at both 412px (370.8px
+      pill, 334.8px square cover, height now auto-sized taller than its
+      own width to fit the text below) and 1000px (unchanged 400x400
+      pill / 300x300 cover, exactly as before).
+    - **Library two-column layout overflowed off the left edge on a real
+      iPad 8th gen** (real screenshot, landscape, ~1080px viewport) - the
+      two fixed 400px columns plus the original 50px `#libraryBody` gap
+      needed 850px, which with `#libraryScreen`'s own 24px×2 padding
+      comes to 898px total. That should have cleared 1080px comfortably,
+      but real Safari still overflowed, invisibly clipped since
+      `html`/`body` have `overflow:hidden` - no scrollbar ever hinted
+      anything was cut off. Root-caused two contributing gaps rather than
+      chasing the exact Safari-specific rendering delta: (1) `.twoColRow`
+      (the chapter-list overflow escalation's two sub-columns) was itself
+      408px (2×200px+8px gap) inside its own 400px-wide parent,
+      `#libraryRightCol` - an 8px overflow of its own, unrelated to the
+      device, just never large enough to notice before. (2) the
+      `@media (max-width:799px)` breakpoint gating the whole two-column
+      layout was never actually wide enough for what it turns on - even
+      the *old* 898px-needed math left every width from 800-898px
+      overflowing by design, a latent bug independent of this specific
+      device. Fixed with three coordinated changes: `#libraryBody`'s gap
+      50px→24px, `.twoColRow`'s sub-columns 200px→196px each (400px
+      total, now matching its parent exactly), and the breakpoint itself
+      799px→899px (so the two-column layout only ever activates at
+      ≥900px, a width its own 824px-plus-padding=872px minimum clears
+      with 28px to spare) - the gap/sub-column shrink alone would have
+      fixed this one reported device, but not the underlying
+      breakpoint-narrower-than-its-own-layout flaw, so both were done
+      together. Verified via direct element-position checks (`rect.left`
+      going negative is the real overflow signal here - `document.body.
+      scrollWidth > innerWidth` reads false-negative once `overflow:hidden`
+      is in play, since the clipped content never registers as
+      scrollable) at 820px (now correctly falls back to single-column,
+      previously the two-column layout's real danger zone), the new
+      899/900px boundary (899 still single-column, 900 switches to
+      two-column with 38px of margin), and the real 1080px iPad width
+      (872px needed, comfortable margin, `.twoColRow` now flush with its
+      parent instead of 8px over).
+    - **Single tap decoupled from play/pause** (real user feedback: on
+      touch devices, revealing the interface meant also pausing playback
+      just to look at it - single tap had been doing double duty as both
+      "toggle chrome" and "toggle playback"). `registerTap()`'s tap-count
+      dispatch shifted down one: 1 tap → `toggleChromeFromTap()` (new),
+      2 taps → `togglePlayPause()` (was 1 tap), 3+ → `goToLibrary()`
+      (unchanged). Applies uniformly everywhere - mouse and touch already
+      shared this one gesture handler via Pointer Events, so desktop
+      clicking the text area now also needs a double-click for play/pause,
+      any width, fullscreen or not, no separate device branch needed.
+      `toggleChromeFromTap()` itself *is* device-branched, matching the
+      two existing conditions chrome-hidden can ever apply under: mobile/
+      tablet zen (any state, `zenCoarsePointerMql`) toggles `chrome-hidden`
+      directly; desktop only while genuinely `document.fullscreenElement`
+      (independent of zen, matching `applyDesktopFullscreenChrome()`'s own
+      gating) - and there it's wired into the *same* `desktopChromeHideTimer`/
+      `DESKTOP_CHROME_HIDE_DELAY` the existing hover-to-reveal already
+      uses, so a tap-triggered reveal auto-hides itself again identically
+      rather than needing a second explicit tap to dismiss. Elsewhere
+      (plain reading mode, desktop zen in a normal window) a single tap
+      is a harmless no-op, since chrome is already always shown there.
+      The pre-existing pause-reveals-chrome behavior
+      (`updateChromeForPlaybackState()`, tied to the `audio` `play`/
+      `pause` events themselves, not this gesture) is untouched - it
+      still fires from *any* pause source (double-tap, the visible
+      play/pause button, a Bluetooth headset button), so resuming
+      playback still re-hides chrome on mobile even after a tap-triggered
+      peek, exactly as before. The dedicated always-visible play/pause
+      *button* also keeps its plain single-click handler unchanged -
+      only the ambiguous whole-text-area gesture needed the double-tap
+      disambiguation, an explicit button never had that ambiguity to
+      begin with. Verified all six combinations directly (paused/
+      playing state before and after, `chrome-hidden` class state): plain
+      reading mode (single tap no-ops, double-tap toggles playback,
+      triple-tap still reaches the library), mobile zen (single tap
+      reveals chrome without touching playback, a second single tap
+      re-hides it, double-tap still pauses and - via the untouched
+      pause-reveals-chrome path - leaves chrome visible), desktop
+      fullscreen (single click reveals chrome without pausing, auto-hides
+      again after the same `DESKTOP_CHROME_HIDE_DELAY` as hovering,
+      double-click still toggles playback), and desktop zen in a normal
+      window (single tap changes nothing, `chrome-hidden` never applies
+      there regardless).
+- **Known limitation, deferred on purpose**: `last_position` is keyed
+  only by `book_id` (see `server/src/db.js`) — no per-user/session
+  column at all. Fine for a single listener (today's actual usage), but
+  if a second concurrent listener ever uses the same book, whichever one
+  reports its position last silently overwrites the other's Continue
+  pill with no merge or warning. Bookmarks don't have this problem (each
+  gets its own row), but do share one list with no ownership - anyone
+  can delete anyone else's. The real fix, discussed but not yet
+  scheduled, is a `user_id`/session column tied to whoever's
+  authenticated via Cloudflare Access (already sitting in every request
+  as a header once Access is in front of the tunnel) - revisit this
+  before actually inviting a second person to use it regularly.
+- **Not yet done**: the two other roadmap pieces explicitly deferred to
+  build on top of this: a streaming-optimized Android client, and TV
+  casting (custom Google Cast receiver).
+
+## Exposing beyond the LAN (in progress, `server/README.md` has the steps)
+
+Domain purchased (`shamareader.online` on GoDaddy) and added to a free
+Cloudflare account; `cloudflared` installed via `winget` on the dev
+machine. Mid-setup, one real snag worth remembering: GoDaddy's default
+"WebsiteBuilder Site" placeholder A record on the bare root (`@`) got
+imported into the Cloudflare zone during the "Add a site" scan, which
+made `cloudflared tunnel route dns audiobook shamareader.online` fail
+with "record already exists" (DNS won't let a CNAME coexist with an A
+record at the same name). Resolved by routing a subdomain instead
+(`audiobook.shamareader.online`) rather than deleting the root record -
+avoids touching the placeholder entirely, and matches the original plan
+of not exposing the bare domain directly. `cloudflared tunnel route dns
+audiobook audiobook.shamareader.online` succeeded once retried against
+the subdomain. Still ahead: point `~/.cloudflared/config.yml`'s
+`hostname` at that same subdomain, confirm `cloudflared tunnel run` +
+`npm start` together actually serve `https://audiobook.shamareader.online`,
+then the Cloudflare Access email-allowlist gate (not yet configured -
+the tunnel alone makes this internet-reachable but not yet
+access-controlled, so don't treat it as safe to leave running unattended
+until Access is confirmed working).
 
 ## Local-only app icon (not in git, don't try to "fix" this)
 

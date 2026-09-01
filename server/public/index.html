@@ -145,14 +145,27 @@
   }
 
   /* Two-column library layout: left = book cover/title/author (reuses
-     .bookPill from the home screen, exact 400x400 at >=800px container
+     .bookPill from the home screen, exact 400x400 at >=900px container
      width); right = chapter pills + bookmarks. Both columns centered as
-     a pair with a fixed 50px gap - see the 800px media query below for
-     the narrow-screen single-column fallback. */
-  #libraryBody { display:flex; flex-wrap:nowrap; justify-content:center; align-items:flex-start; gap:50px; }
+     a pair - see the 900px media query below for the narrow-screen
+     single-column fallback. Real iPad 8th gen report: at this size's
+     actual ~1080px landscape viewport, the two fixed 400px columns plus
+     the original 50px gap (850px total, before #libraryScreen's own 24px
+     x2 padding = 898px needed) left the whole row overflowing off the
+     left edge on real Safari, invisibly clipped since html/body have
+     overflow:hidden. Tightened the gap to 24px (824+48=872px needed),
+     *and* moved the breakpoint itself from 800 to 900px - 800 was never
+     actually wide enough for this layout's real minimum even before this
+     fix (872px including the old 50px gap's math would've been 898px),
+     so anything in the 800-872px range was silently overflowing by
+     design, not just on this one reported device. 900px leaves 28px of
+     real margin at its own threshold, clearing every popular breakpoint
+     immediately below it (768/810/820/834) into the safe single-column
+     layout instead of a cramped two-column one. */
+  #libraryBody { display:flex; flex-wrap:nowrap; justify-content:center; align-items:flex-start; gap:24px; }
   /* Album art pill + Continue (if any), stacked as one unit so Continue
      always sits directly under the art regardless of breakpoint - see
-     the 800px media query below, which only changes whether this whole
+     the 900px media query below, which only changes whether this whole
      wrapper sits beside or above the right column, never Continue's
      position relative to the art pill itself. */
   #libraryLeftColWrap { display:flex; flex-direction:column; align-items:center; gap:12px; flex-shrink:0; }
@@ -179,8 +192,12 @@
     overflow:hidden; text-overflow:ellipsis; font-size:14px; cursor:pointer; flex-shrink:0;
   }
   .chapterPill.continuePill { border-color:var(--accent); color:var(--accent); }
-  .twoColRow { display:flex; gap:8px; width:408px; align-items:flex-start; } /* 2 x 200px + 8px gap */
-  .twoColRow .pillWrap { width:200px; flex-shrink:0; }
+  /* 2 x 196px + 8px gap = 400px - matches #libraryRightCol's own width
+     exactly (was 2x200+8=408px, 8px wider than its 400px parent - a
+     small pre-existing overflow of its own, folded into the same pass
+     that fixed the real iPad #libraryBody overflow above). */
+  .twoColRow { display:flex; gap:8px; width:400px; align-items:flex-start; }
+  .twoColRow .pillWrap { width:196px; flex-shrink:0; }
 
   .sectionLabel { color:var(--muted2); font-size:12px; margin:0 0 8px; text-transform:uppercase; letter-spacing:0.04em; }
   #emptyMsg { color:var(--muted2); font-size:14px; margin-bottom:16px; }
@@ -190,15 +207,29 @@
      positioned wrapper instead of sitting directly in the flex-wrap
      (same swipe mechanic as before, just resized to the 35px pill). */
   .bookmarkWrap { position:relative; overflow:hidden; border-radius:999px; height:35px; width:100%; max-width:400px; }
-  .bookmarkWrap .chapterPill { position:relative; z-index:1; width:100%; height:100%; justify-content:flex-start; }
+  .bookmarkWrap .chapterPill { position:relative; z-index:1; width:100%; height:100%; }
   .bookmarkDelete { position:absolute; top:0; right:0; bottom:0; width:72px; border:none; border-radius:0 999px 999px 0;
     background:#7a3030; color:#fff; font-size:13px; }
 
-  @media (max-width:799px) {
+  @media (max-width:899px) {
     #libraryBody { flex-direction:column; align-items:center; }
-    .libraryBookPill { width:min(400px, 90vw); height:min(400px, 90vw); }
+    /* height:auto, not another min(400px, 90vw) forcing a square: the
+       cover art inside is a fixed 300x300 (.bookCover/.bookCoverPlaceholder
+       above), sized for the ≥900px case where the pill itself is a fixed
+       400x400 - forcing this pill to *also* be a shrunk square (e.g.
+       370.8px on a real 412px-wide phone) left no room for the still-300px
+       cover plus its two text lines plus padding, so the title/author
+       visibly overflowed past the pill's own rounded border (found via a
+       real device screenshot, not just at some inspected breakpoint).
+       Scaling the cover itself down via aspect-ratio below, then letting
+       this pill's height just follow its content, fixes it for any width
+       rather than tuning another magic threshold. */
+    .libraryBookPill { width:min(400px, 90vw); height:auto; }
+    .libraryBookPill .bookCover, .libraryBookPill .bookCoverPlaceholder {
+      width:100%; height:auto; aspect-ratio:1 / 1;
+    }
     #libraryRightCol { width:100%; max-width:400px; }
-    /* Not enough width for two 200px sub-columns side by side on a
+    /* Not enough width for two 196px sub-columns side by side on a
        narrow screen - stack them instead (left sub-column's chapters,
        then the right sub-column's Continue+remainder, both full width). */
     .twoColRow { flex-direction:column; width:100%; }
@@ -240,6 +271,15 @@
   #playerControls.hide-chapter #nextChapterBtn { display:none; }
   #playerControls.hide-part #prevPartBtn,
   #playerControls.hide-part #nextPartBtn { display:none; }
+  /* Even with hide-chapter+hide-part applied, a lone play/pause button
+     still visibly crowded the chapter/speed pill column on a real
+     412px-wide phone with a long "Chapter: X/Y Part: A/B" pill string -
+     the middle grid column's minmax(36px, 1fr) floor guarantees just
+     enough room for the button itself, with no breathing space left
+     over. Below 450px (a real device measurement, not derived from any
+     particular content), drop play/pause too rather than let it render
+     right up against its neighbor. */
+  #playerControls.hide-playpause #playPauseBtn { display:none; }
   /* Same protected top zone as #readerTopBar (#frame's 64px top padding
      below runs the full width of the frame, not just under the left
      icons) - just anchored to the right edge instead. Slot order,
@@ -893,8 +933,8 @@
 
     // Left column wrapper: album art pill, then Continue directly below
     // it (if a resume position exists) - same relative DOM position
-    // works for both the >=800px side-by-side layout (Continue sits
-    // under the art pill within this one stacked unit) and the <800px
+    // works for both the >=900px side-by-side layout (Continue sits
+    // under the art pill within this one stacked unit) and the <900px
     // single-column layout (this whole wrapper is "the first thing",
     // so Continue naturally lands right after the art there too,
     // without needing separate positioning logic per breakpoint).
@@ -1321,13 +1361,24 @@
   function playerControlsRowWidth(n){
     return n * PLAYER_CONTROLS_BTN + (n - 1) * PLAYER_CONTROLS_GAP;
   }
+  // Below this real device width (a 412px phone's own viewport, per
+  // on-device testing), even a lone play/pause button - already the
+  // last one left after hide-chapter+hide-part - crowds a long
+  // "Chapter: X/Y Part: A/B" pill with no breathing room. This check is
+  // independent of the content-fit measurement above (a fixed viewport
+  // width, not a measured one), since it's specifically about not
+  // rendering the button at all below a known-bad real width, not about
+  // whatever happens to fit.
+  var PLAYER_CONTROLS_MIN_VIEWPORT = 450;
+
   function updatePlayerControlsFit(){
     playerControls.classList.remove('hide-chapter', 'hide-part');
     var available = playerControls.clientWidth;
-    if (playerControlsRowWidth(5) <= available) return;
-    playerControls.classList.add('hide-chapter');
-    if (playerControlsRowWidth(3) <= available) return;
-    playerControls.classList.add('hide-part');
+    if (playerControlsRowWidth(5) > available) {
+      playerControls.classList.add('hide-chapter');
+      if (playerControlsRowWidth(3) > available) playerControls.classList.add('hide-part');
+    }
+    playerControls.classList.toggle('hide-playpause', window.innerWidth < PLAYER_CONTROLS_MIN_VIEWPORT);
   }
   window.addEventListener('resize', updatePlayerControlsFit);
 
@@ -1897,8 +1948,42 @@
     playPauseBtn.setAttribute('aria-label', audio.paused ? 'Play' : 'Pause');
   }
 
-  audio.addEventListener('play', function(){ reportPlaybackState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); });
-  audio.addEventListener('pause', function(){ reportPlaybackState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); });
+  audio.addEventListener('play', function(){ reportPlaybackState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); acquireWakeLock(); });
+  audio.addEventListener('pause', function(){ reportPlaybackState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); releaseWakeLock(); });
+
+  // --- Screen Wake Lock: keeps the device screen from sleeping during
+  // playback, matching the Android app's own screen-on behavior while a
+  // chapter is playing (there's no browser equivalent of a foreground
+  // service holding a wake lock - this API is the closest platform
+  // match). Feature-detected since support varies (iOS Safari 16.4+,
+  // most modern Android/desktop browsers) - silently does nothing where
+  // unavailable rather than breaking playback.
+  var wakeLock = null;
+
+  async function acquireWakeLock(){
+    if (!('wakeLock' in navigator) || wakeLock) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', function(){ wakeLock = null; });
+    } catch (e) {
+      // Common, harmless causes: tab not visible yet, battery saver,
+      // permissions policy - the screen just sleeps normally instead.
+      console.log('wakeLock request failed: ' + e);
+    }
+  }
+  function releaseWakeLock(){
+    if (!wakeLock) return;
+    wakeLock.release().catch(function(){});
+    wakeLock = null;
+  }
+  // The lock is auto-released by the browser whenever the tab is
+  // hidden/backgrounded (per spec) - reacquire it once the tab is
+  // visible again if audio is still playing, so switching back from
+  // another app mid-chapter restores the same screen-stays-on behavior
+  // instead of silently losing it for the rest of the session.
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible' && !audio.paused) acquireWakeLock();
+  });
 
   audio.addEventListener('timeupdate', function(){
     var t = audio.currentTime;
@@ -1976,9 +2061,19 @@
   window.mediaPrevious = function(){ goPrev(); };
   window.mediaSeekTo = function(seconds){ seekToTime(seconds); };
 
-  // --- Gestures on the text area: tap to play/pause, triple-tap to go
-  // back to the library, edge-swipe to prev/next. All funneled through
-  // Pointer Events so mouse (desktop testing) and touch behave the same.
+  // --- Gestures on the text area: single tap to reveal chrome,
+  // double-tap to play/pause, triple-tap to go back to the library,
+  // edge-swipe to prev/next. All funneled through Pointer Events so
+  // mouse (desktop, any width, fullscreen or not) and touch behave the
+  // same - single tap = reveal, double tap = play/pause applies
+  // uniformly everywhere, not just touch devices.
+  //
+  // Single tap used to double as play/pause, which real use showed up
+  // as an inconvenience: revealing the interface on a touch device
+  // meant also pausing playback just to look at it. Moved play/pause to
+  // double-tap so the two are independent - a single tap now only ever
+  // reveals chrome (see toggleChromeFromTap() below), never touches
+  // playback.
   var EDGE_ZONE = 32;
   var SWIPE_MIN_DX = 48;
   var TAP_MAX_MOVE = 12;
@@ -1997,12 +2092,40 @@
     if (tapTimer) clearTimeout(tapTimer);
     tapTimer = setTimeout(function(){
       if (tapCount === 1) {
+        toggleChromeFromTap();
+      } else if (tapCount === 2) {
         togglePlayPause();
       } else if (tapCount >= 3) {
         goToLibrary();
       }
       tapCount = 0;
     }, TAP_GAP_MS);
+  }
+
+  // Single-tap chrome reveal - only meaningful where chrome can actually
+  // be hidden in the first place: mobile/tablet zen (any state, coarse
+  // pointer) or desktop while genuinely fullscreen (fine pointer). A tap
+  // elsewhere (plain reading mode, or desktop zen in a normal window) is
+  // a harmless no-op, since chrome is already always visible there.
+  // Toggles rather than only ever showing, so a second tap can dismiss
+  // it again without needing to reach for the mouse/hover zone - on
+  // desktop this shares the exact same auto-hide timer as the existing
+  // hover-to-reveal, so a tap-triggered reveal behaves identically
+  // (hides itself again after DESKTOP_CHROME_HIDE_DELAY of inactivity)
+  // rather than needing a second explicit tap to dismiss.
+  function toggleChromeFromTap(){
+    if (zenCoarsePointerMql.matches) {
+      if (!zenActive) return;
+      readerScreen.classList.toggle('chrome-hidden');
+    } else {
+      if (!document.fullscreenElement) return;
+      readerScreen.classList.toggle('chrome-hidden');
+      clearTimeout(desktopChromeHideTimer);
+      if (readerScreen.classList.contains('chrome-hidden')) return;
+      desktopChromeHideTimer = setTimeout(function(){
+        readerScreen.classList.add('chrome-hidden');
+      }, DESKTOP_CHROME_HIDE_DELAY);
+    }
   }
 
   frame.addEventListener('pointerdown', function(e){
