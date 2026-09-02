@@ -1210,9 +1210,98 @@ plan; this section is the load-bearing summary.
   authenticated via Cloudflare Access (already sitting in every request
   as a header once Access is in front of the tunnel) - revisit this
   before actually inviting a second person to use it regularly.
-- **Not yet done**: the two other roadmap pieces explicitly deferred to
-  build on top of this: a streaming-optimized Android client, and TV
-  casting (custom Google Cast receiver).
+- **Not yet done**: the streaming-optimized Android client, the other
+  roadmap piece deferred to build on top of this.
+
+## Cast to TV (in progress) - custom Google Cast receiver
+
+Casts the same way Plex/YouTube do: the sender (this web client) only ever
+sends a "load this URL" command plus lightweight transport commands; the
+Chromecast fetches audio directly from this server and renders its own
+on-TV UI - this page never proxies media bytes itself. Registered as a
+**custom** receiver (not the free Default Media Receiver) specifically so
+the TV can show the vertical-text reveal + character art, which a generic
+receiver has no way to render (it only accepts title/subtitle/image
+metadata fields).
+
+- **Setup already done**: Google Cast SDK developer registration
+  ($5 one-time fee) at `cast.google.com/publish`; custom receiver
+  application registered there with **App ID `658FAEC7`** and Receiver
+  Application URL `https://audiobook.shamareader.online/cast-receiver.html`
+  (must be HTTPS - a hard Chromecast requirement, independent of the
+  LAN-only scope decision below, so **the Cloudflare Tunnel needs to be
+  running whenever casting is used**, purely so the TV can fetch this one
+  page - the actual audio stays on the LAN). Target hardware confirmed:
+  Chromecast / Chromecast built-in TV (Google Cast, not AirPlay).
+- **Scope decision**: LAN-only for v1 - no attempt yet to solve a
+  Chromecast fetching audio through the Cloudflare Access-gated tunnel
+  from outside the house (Access isn't configured yet per the section
+  below, so this isn't a live problem today, but will need solving -
+  probably a path exclusion for `/cast-receiver.html`, or the TV won't
+  even be able to load the receiver page once Access is added - before
+  casting is used again once Access ships).
+- **`server/public/cast-receiver.html`** (new file) - runs on the TV
+  itself. A **derived copy** of `index.html`'s vertical-text reveal engine
+  (`showPage()`/`applyInitialSpanState()`/`updateChunkHighlight()`/
+  `fitFontSize()`), not a shared module - same pattern as `bridge-shim.js`
+  vs the Android app: same engine, different host environment, duplicated
+  deliberately. Loads the CAF Receiver SDK, which owns actual audio
+  playback itself (fetches/plays the `contentId` URL internally, same as
+  a `<video>`/`<audio>` element would) - this page only listens to
+  `PlayerManager`'s `TIME_UPDATE` events to drive the visual layer, it
+  never creates its own `<audio>` element. A `LOAD` message interceptor
+  reads `{bookId, chapterBase, textPreset}` out of `media.customData` (set
+  by the sender) and fetches `.../sync` + `.../images` itself, in
+  parallel, directly from this server - no new server routes needed, it's
+  the exact same API `index.html` already uses. Deliberately simplified
+  vs. the phone client: no gestures, no icon buttons, no responsive
+  breakpoints, no zen-vs-normal distinction - a TV has one fixed screen
+  size for the life of a session and no input of its own (transport
+  commands all arrive from the sender), so this is effectively always
+  "zen mode." Verified in this sandbox: the CAF SDK loads and
+  initializes cleanly (its WebSocket connection attempts to
+  `ws://localhost:8008/v2/ipc` fail here as expected - that's the real
+  Chromecast hardware's local IPC channel, unavailable in a plain browser
+  tab, not a bug), and the reveal engine renders correctly when driven
+  manually (per-character highlight color, feathered side image) -
+  confirms the CSS/logic port is correct, though the actual `LOAD`
+  interceptor path can only be exercised by a real cast session.
+- **Sender changes in `index.html`**: loads the Cast Sender SDK, a new
+  `#castBtn` (same `.iconBtn` styling as every other icon, at the next
+  slot out - `right:192px`), hidden until `CAST_STATE_CHANGED` reports a
+  device is actually available. `castLoadCurrentChapter()` builds a
+  `chrome.cast.media.MediaInfo` from `window.location.origin +
+  window.audioUrl(...)` (an absolute URL - Cast needs one, unlike the
+  relative URLs `bridge-shim.js` normally hands out) plus the
+  `customData` the receiver reads. While a session is active,
+  `togglePlayPause()`/`seekToTime()`/`renderVolumeLevel()`/
+  `updatePlayPauseIcon()`/`reportPlaybackState()` all branch to drive
+  `RemotePlayerController` instead of the local `<audio>` element -
+  verified this branching is clean by simulating a **full fake Cast SDK**
+  in this sandbox (real device discovery obviously can't be tested here,
+  but the entire sender-side state machine can): captured the
+  `SESSION_STATE_CHANGED` listener and fired it manually, confirming in
+  order - local audio correctly paused on session start,
+  `loadMedia()` called with the right absolute URL/contentType/customData,
+  `#frame` swaps to a "Casting to Living Room TV" placeholder (the
+  existing progress bar/meta row/player-controls stay untouched and fully
+  functional as remote controls, matching how YouTube/Spotify behave once
+  casting starts rather than trying to keep two independent text-reveal
+  engines in lockstep), play/pause and seek and volume all routed to the
+  fake `RemotePlayerController` without touching local `audio.currentTime`/
+  `.paused`/`.volume`, and ending the session handed playback back to the
+  phone at the exact remote position it left off at (via
+  `openChapter(pendingChapterBase, resumeAt)`, the same resume path
+  already used elsewhere). Chapter auto-advance while casting is detected
+  via `PLAYER_STATE_CHANGED` reaching `IDLE` with `idleReason: FINISHED` -
+  the Cast media protocol's way of saying playback ran to completion, not
+  just stopped by a command - mirroring the local `<audio>` `'ended'`
+  handler's own chapter-advance logic.
+- **Not yet done**: the actual on-TV test (real Chromecast hardware,
+  registered as an unpublished custom receiver's test device in the same
+  developer console) - this fundamentally can't be exercised from this
+  sandbox, only the sender-side state machine and the receiver's visual
+  rendering could be verified as above.
 
 ## Exposing beyond the LAN (in progress, `server/README.md` has the steps)
 

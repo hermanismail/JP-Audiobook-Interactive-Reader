@@ -17,6 +17,11 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+<!-- Cast Sender SDK - fires window['__onGCastApiAvailable'] (defined in the
+     main script below) once loaded. Harmless if it never loads/fires at all
+     (e.g. no network, or a browser without Cast support) - #castBtn just
+     never gets its 'available' class and stays hidden, same as it starts. -->
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
 <title>JP Audiobook Player</title>
 <style>
   /* Theme: dark (default) / light, toggled via a .light class on <html>
@@ -306,6 +311,30 @@
   #forceZenBtn.active { border-color:var(--accent); color:var(--accent); }
   @media (pointer: coarse) { #fullscreenToggleBtn { display:none; } }
   @media (pointer: fine) { #forceZenBtn { display:none; } }
+  /* Next slot out (148+44=192) - cast-to-TV, hidden entirely until the Cast
+     Sender SDK actually reports a device is available on the network
+     (see castApiInit() in the script), same as how YouTube/Netflix's own
+     cast icon only appears once there's somewhere to cast to. */
+  #castBtn { position:absolute; top:16px; right:192px; z-index:5; display:none; }
+  #castBtn.available { display:flex; }
+  #castBtn.active { border-color:var(--accent); color:var(--accent); }
+
+  /* Shown instead of #pageText/#zenImageWrap while a cast session is
+     active - the phone stops running its own copy of the reveal engine
+     once the TV (via cast-receiver.html) is the one actually displaying
+     it, matching how YouTube/Spotify swap to a plain "now playing on
+     [device]" card rather than mirroring the full view during a cast
+     session. The existing progress bar/meta row/player-controls stay
+     exactly where they are and keep working as remote-control affordances -
+     only the frame's own content is replaced. */
+  #castingOverlay {
+    display:none; flex-direction:column; align-items:center; justify-content:center;
+    gap:12px; height:100%; color:var(--muted); text-align:center; padding:0 26px;
+    box-sizing:border-box; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+  }
+  #castingOverlay svg { color:var(--ink); }
+  #frame.casting #pageText, #frame.casting #zenImageWrap { display:none !important; }
+  #frame.casting #castingOverlay { display:flex; }
 
   /* Volume control: a small stack of four pills (+ / level / - / mute)
      drops down below the volume icon, all the same 36px .iconBtn size
@@ -617,12 +646,19 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>
     </button>
   </div>
+  <button id="castBtn" class="iconBtn" aria-label="Cast to TV">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16.1A5 5 0 0 1 5.9 20"/><path d="M2 12.05A9 9 0 0 1 9.95 20"/><path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/><line x1="2" y1="20" x2="2.01" y2="20"/></svg>
+  </button>
 
   <div id="frame">
     <div id="pageText"></div>
     <div id="loadingOverlay">Preparing chapter&hellip; <span id="loadingPercent">0</span>%</div>
     <div id="measure"></div>
     <div id="zenImageWrap"><img id="zenImage"></div>
+    <div id="castingOverlay">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 16.1A5 5 0 0 1 5.9 20"/><path d="M2 12.05A9 9 0 0 1 9.95 20"/><path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/><line x1="2" y1="20" x2="2.01" y2="20"/></svg>
+      <div>Casting to <span id="castingDeviceName"></span></div>
+    </div>
   </div>
 
   <div id="bookmarkToast"></div>
@@ -742,6 +778,9 @@
   var forceZenBtn = document.getElementById('forceZenBtn');
   var zenImageWrap = document.getElementById('zenImageWrap');
   var zenImage = document.getElementById('zenImage');
+  var castBtn = document.getElementById('castBtn');
+  var castingOverlay = document.getElementById('castingOverlay');
+  var castingDeviceName = document.getElementById('castingDeviceName');
 
   var elapsedLabel = document.getElementById('elapsedLabel');
   var totalLabel = document.getElementById('totalLabel');
@@ -1240,7 +1279,15 @@
     var resumeSeconds = pendingResumeSeconds;
     pendingResumeSeconds = null;
 
-    if (resumeSeconds) {
+    if (castSession) {
+      // The TV (cast-receiver.html) does its own fetch of sync/images/cover
+      // from bookId+chapterBase, and drives its own copy of the reveal
+      // engine off the Cast media session's reported time - see
+      // castLoadCurrentChapter() below. Nothing here needs to touch the
+      // local <audio> element at all.
+      chapterTimeOffset = 0;
+      castLoadCurrentChapter(resumeSeconds || 0);
+    } else if (resumeSeconds) {
       // seekToTime() only ever sets audio.currentTime - it assumes a
       // source is already loaded (true for every other call site: drag-
       // to-seek/next-part/prev-part all act on a chapter that's already
@@ -1973,17 +2020,19 @@
   // updates on its own using the reported speed.
   var lastReportedSecond = -1;
   function reportPlaybackState(force){
-    var t = (audio.currentTime || 0) + chapterTimeOffset;
+    var t = castSession ? (remotePlayer.currentTime || 0) : ((audio.currentTime || 0) + chapterTimeOffset);
     var sec = Math.floor(t);
     if (!force && sec === lastReportedSecond) return;
     lastReportedSecond = sec;
-    Android.reportPlaybackState(!audio.paused, t, chapterDuration, currentSpeed, pendingChapterBase);
+    var paused = castSession ? remotePlayer.isPaused : audio.paused;
+    Android.reportPlaybackState(!paused, t, chapterDuration, currentSpeed, pendingChapterBase);
   }
 
   function updatePlayPauseIcon(){
-    playIcon.style.display = audio.paused ? '' : 'none';
-    pauseIcon.style.display = audio.paused ? 'none' : '';
-    playPauseBtn.setAttribute('aria-label', audio.paused ? 'Play' : 'Pause');
+    var paused = castSession ? remotePlayer.isPaused : audio.paused;
+    playIcon.style.display = paused ? '' : 'none';
+    pauseIcon.style.display = paused ? 'none' : '';
+    playPauseBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
   }
 
   audio.addEventListener('play', function(){ reportPlaybackState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); acquireWakeLock(); });
@@ -2047,6 +2096,7 @@
   });
 
   function togglePlayPause(){
+    if (castSession) { remotePlayerController.playOrPause(); return; }
     if(audio.paused) audio.play(); else audio.pause();
   }
 
@@ -2066,6 +2116,12 @@
   function seekToTime(targetTime){
     if (chapterDuration > 0) targetTime = Math.max(0, Math.min(targetTime, chapterDuration));
     else targetTime = Math.max(0, targetTime);
+    if (castSession) {
+      remotePlayer.currentTime = targetTime;
+      remotePlayerController.seek();
+      updateForCastTime(targetTime);
+      return;
+    }
     var wasPlaying = !audio.paused;
     audio.currentTime = targetTime;
     if (wasPlaying) audio.play();
@@ -2281,7 +2337,12 @@
 
   function renderVolumeLevel(){
     volumeLevelPill.textContent = volumeLevel;
-    audio.volume = volumeLevel / 100;
+    if (castSession) {
+      remotePlayer.volumeLevel = volumeLevel / 100;
+      remotePlayerController.setVolumeLevel();
+    } else {
+      audio.volume = volumeLevel / 100;
+    }
   }
   renderVolumeLevel(); // audio.volume defaults to 1 - sync the pill up front
 
@@ -2346,6 +2407,207 @@
     }
     volumePopup.classList.remove('show');
   });
+
+  // --- Cast to TV: the sender side of a custom Cast Application
+  // (658FAEC7 - registered at cast.google.com/publish). Casts the same way
+  // Plex/YouTube do - this page only ever sends a "load this URL" command
+  // and lightweight transport commands; the Chromecast fetches the actual
+  // audio directly from this server (see the LoadRequest below), and
+  // cast-receiver.html (a derived copy of this file's own reveal engine,
+  // running on the TV) renders the vertical text/side image, driven by the
+  // Cast media session's own reported time rather than a local <audio>
+  // element. LAN-only for now: the media URL is built from
+  // window.location.origin, so it only reaches the Chromecast if this page
+  // itself was loaded from an address the TV can also reach - fine for the
+  // common case (same LAN), not yet solved for casting while away from
+  // home through the Cloudflare Tunnel (see CLAUDE.md's cast-to-TV entry).
+  var castSession = null;
+  var remotePlayer = null;
+  var remotePlayerController = null;
+
+  // Lightweight companion to updateForTime() (used for local <audio>
+  // playback) - keeps the progress bar, chapter pill, and idx (so goNext()/
+  // goPrev()'s idx+1/idx-1 math stays correct) in sync with the Cast
+  // session's reported time, without running any of the local text-reveal
+  // work (showPage/updateChunkHighlight/updateZenImageForTime) that
+  // #frame.casting already hides in favor of the TV's own copy of it.
+  function updateForCastTime(t){
+    renderTimeUI(t);
+    if (chunks.length) {
+      idx = currentChunkIndex(t);
+      updateChapterPill();
+    }
+  }
+
+  function castLoadCurrentChapter(resumeSeconds){
+    if (!castSession || !pendingChapterBase) return;
+    var absoluteAudioUrl = window.location.origin + window.audioUrl(pendingChapterBase);
+    // TEMPORARY - real-device testing hit a generic CAF detailedErrorCode 905
+    // (LOAD_FAILED) immediately after our own LOAD interceptor logic
+    // succeeded, with no more specific reason attached. ?castTest=1 in the
+    // URL swaps in a known-good external test MP3 (no embedded ID3 art,
+    // unlike every one of our own chapter files) instead of the real
+    // chapter, to isolate whether CAF/this TV can load ANY external audio at
+    // all, or whether it's specific to our own files (e.g. the embedded ID3
+    // cover art every chapter carries, which a stricter TV-side demuxer
+    // might choke on even though a plain browser tab tolerates it fine).
+    // Remove this whole block once cast-to-TV is confirmed working.
+    var isTestMode = /[?&]castTest=1\b/.test(window.location.search);
+    if (isTestMode) {
+      absoluteAudioUrl = 'https://www.learningcontainer.com/wp-content/uploads/2020/02/Kalimba.mp3';
+    }
+    var mediaInfo = new chrome.cast.media.MediaInfo(absoluteAudioUrl, 'audio/mpeg');
+    // Real-device testing found the receiver reaching prepareChapter() (its
+    // own sync/images fetch succeeded) but never once requesting the audio
+    // itself - CAF's own media pipeline never attempted the fetch at all.
+    // contentId alone isn't enough for CAF v3's default pipeline to know
+    // where to actually pull bytes from; contentUrl needs to be set
+    // explicitly too, and a VOD file needs an explicit streamType or the
+    // player doesn't reliably treat it as seekable/bufferable.
+    mediaInfo.contentUrl = absoluteAudioUrl;
+    mediaInfo.streamType = chrome.cast.media.StreamType.BUFFERED;
+    // TEMPORARY - the full LOAD payload logged from the receiver looked
+    // completely well-formed (contentUrl included) and still hit the same
+    // generic 905, with an unrelated external test file failing identically
+    // while Google's own Default Media Receiver played that exact same
+    // MediaInfo shape fine - next theory: BUFFERED streams may need an
+    // explicit duration up front for a bare custom PlayerManager to accept
+    // them, where DMR's own pipeline probes it. We already track this
+    // chapter's real duration client-side once sync.json loads.
+    if (!isTestMode && chapterDuration > 0) {
+      mediaInfo.duration = chapterDuration;
+    }
+    mediaInfo.metadata = new chrome.cast.media.MusicTrackMediaMetadata();
+    mediaInfo.metadata.title = chapterTitleEl.textContent || humanize(pendingChapterBase);
+    mediaInfo.metadata.artist = authorTitleEl.textContent || '';
+    if (coverArt.style.display !== 'none' && coverArt.src) {
+      mediaInfo.metadata.images = [new chrome.cast.Image(coverArt.src)];
+    }
+    // cast-receiver.html's LOAD interceptor reads these to fetch sync/
+    // images itself - see its prepareChapter().
+    mediaInfo.customData = {
+      bookId: Android.currentBookId(),
+      chapterBase: pendingChapterBase,
+      textPreset: textPreset
+    };
+
+    var request = new chrome.cast.media.LoadRequest(mediaInfo);
+    request.currentTime = resumeSeconds || 0;
+    request.autoplay = true;
+
+    loadingOverlay.style.display = 'none';
+    frame.classList.add('casting');
+    castingDeviceName.textContent = castSession.getCastDevice().friendlyName;
+
+    castSession.loadMedia(request).catch(function(e){
+      console.log('castLoadMedia failed: ' + e);
+    });
+  }
+
+  function onCastSessionStarted(session){
+    castSession = session;
+    remotePlayer = new cast.framework.RemotePlayer();
+    remotePlayerController = new cast.framework.RemotePlayerController(remotePlayer);
+
+    remotePlayerController.addEventListener(
+      cast.framework.RemotePlayerEventType.IS_PAUSED_CHANGED,
+      updatePlayPauseIcon
+    );
+    remotePlayerController.addEventListener(
+      cast.framework.RemotePlayerEventType.CURRENT_TIME_CHANGED,
+      function(){
+        updateForCastTime(remotePlayer.currentTime || 0);
+        reportPlaybackState(false);
+      }
+    );
+    remotePlayerController.addEventListener(
+      cast.framework.RemotePlayerEventType.DURATION_CHANGED,
+      function(){
+        if (remotePlayer.duration) {
+          chapterDuration = remotePlayer.duration;
+          totalLabel.textContent = formatTime(chapterDuration);
+        }
+      }
+    );
+    // Reflects volume changes made from elsewhere (the TV remote, another
+    // sender) - assigns the shared vars/pill directly rather than going
+    // through renderVolumeLevel(), which would otherwise re-issue a
+    // redundant setVolumeLevel() command right back at the session it just
+    // came from.
+    remotePlayerController.addEventListener(
+      cast.framework.RemotePlayerEventType.VOLUME_LEVEL_CHANGED,
+      function(){
+        volumeLevel = Math.round((remotePlayer.volumeLevel || 0) * 100);
+        volumeLevelPill.textContent = volumeLevel;
+      }
+    );
+    // Natural end-of-chapter (matches the local <audio> 'ended' handler
+    // above) - IDLE + FINISHED is the Cast media protocol's way of saying
+    // playback ran to completion, not just paused/stopped by a command.
+    remotePlayerController.addEventListener(
+      cast.framework.RemotePlayerEventType.PLAYER_STATE_CHANGED,
+      function(){
+        if (remotePlayer.playerState !== chrome.cast.media.PlayerState.IDLE) return;
+        var media = castSession.getMediaSession();
+        if (!media || media.idleReason !== chrome.cast.media.IdleReason.FINISHED) return;
+        var currentIndex = allChapters.indexOf(pendingChapterBase);
+        if (currentIndex >= 0 && currentIndex + 1 < allChapters.length) {
+          openChapter(allChapters[currentIndex + 1]);
+        }
+      }
+    );
+
+    castBtn.classList.add('active');
+    audio.pause();
+    if (pendingChapterBase) castLoadCurrentChapter((audio.currentTime || 0) + chapterTimeOffset);
+  }
+
+  function onCastSessionEnded(){
+    // Hands playback back to the phone from wherever the TV left off,
+    // rather than silently losing the position or leaving it paused with
+    // no visible player - matches ending a cast session in most apps.
+    var resumeAt = remotePlayer ? (remotePlayer.currentTime || 0) : 0;
+    castSession = null;
+    remotePlayer = null;
+    remotePlayerController = null;
+    castBtn.classList.remove('active');
+    frame.classList.remove('casting');
+    if (pendingChapterBase) openChapter(pendingChapterBase, resumeAt);
+  }
+
+  window['__onGCastApiAvailable'] = function(isAvailable){
+    if (!isAvailable) return;
+    var context = cast.framework.CastContext.getInstance();
+    // TEMPORARY - a known-good external test MP3 hit the exact same generic
+    // CAF detailedErrorCode 905 (LOAD_FAILED) as our own audio through our
+    // custom receiver (658FAEC7), ruling out our audio files/tunnel. ?castDMR=1
+    // swaps in Google's own Default Media Receiver instead, to isolate
+    // whether the problem is specific to our custom receiver app/setup, or
+    // this TV's Cast pipeline failing to load ANY external media at all,
+    // regardless of receiver. Remove once cast-to-TV is confirmed working.
+    var useDMR = /[?&]castDMR=1\b/.test(window.location.search);
+    context.setOptions({
+      receiverApplicationId: useDMR ? chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID : '658FAEC7',
+      autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+    });
+
+    context.addEventListener(cast.framework.CastContextEventType.CAST_STATE_CHANGED, function(event){
+      castBtn.classList.toggle('available', event.castState !== cast.framework.CastState.NO_DEVICES_AVAILABLE);
+    });
+
+    context.addEventListener(cast.framework.CastContextEventType.SESSION_STATE_CHANGED, function(event){
+      if (event.sessionState === cast.framework.SessionState.SESSION_STARTED ||
+          event.sessionState === cast.framework.SessionState.SESSION_RESUMED) {
+        onCastSessionStarted(context.getCurrentSession());
+      } else if (event.sessionState === cast.framework.SessionState.SESSION_ENDED) {
+        onCastSessionEnded();
+      }
+    });
+
+    castBtn.addEventListener('click', function(){
+      context.requestSession().catch(function(e){ console.log('requestSession failed: ' + e); });
+    });
+  };
 
   renderHome();
 })();

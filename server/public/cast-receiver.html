@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>SHAMA Cast Receiver</title>
+<!--
+  Runs ON the Chromecast/TV itself, loaded by Google's Cast infrastructure
+  once a sender starts a session against App ID 658FAEC7 (see index.html's
+  #castBtn / castLoadCurrentChapter()). This is a derived copy of index.html's
+  vertical-text reveal engine, not a shared module - same pattern already
+  used for bridge-shim.js vs the Android app: same engine, different host
+  environment, deliberately duplicated rather than abstracted, since the two
+  run in completely different execution contexts (CAF's PlayerManager owns
+  actual audio playback here - there is no local <audio> element at all,
+  only a visual layer driven by PlayerManager's TIME_UPDATE events).
+
+  Deliberately simplified vs. the phone/desktop web client: no gestures, no
+  icon buttons, no responsive breakpoints, no zen-mode-vs-normal distinction -
+  a TV has one fixed screen size for the life of a cast session and no input
+  of its own (all transport commands arrive from the sender), so this is
+  effectively always "zen mode", full time. See CLAUDE.md's cast-to-TV entry
+  for the fuller design note and what's intentionally NOT replicated (e.g.
+  the "hide side image and let text use full width" behavior of the web
+  client's getAvailableSpace() - this always reserves the two-column split).
+-->
+<style>
+  html, body { margin:0; height:100%; background:#0b0b0d; overflow:hidden; }
+  #idleMessage {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:#9b93b0; font-family:"Roboto","Arial",sans-serif; font-size:5vw; font-weight:700;
+    letter-spacing:0.1em;
+  }
+  #frame {
+    display:none; box-sizing:border-box; height:100%;
+    align-items:center; justify-content:flex-end;
+    padding:5vh 5vw; gap:3vw;
+  }
+  #pageText {
+    writing-mode:vertical-rl; height:100%; letter-spacing:0.06em; font-weight:500;
+    opacity:1; transition:opacity 0.3s;
+    color:#d6d6d6; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    overflow-wrap:anywhere;
+  }
+  #pageText span { transition:color 0.2s ease, opacity 0.15s linear; }
+  #measure {
+    position:absolute; visibility:hidden; top:-9999px; left:-9999px;
+    writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500;
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    white-space:normal; overflow-wrap:anywhere;
+  }
+  #debugOverlay {
+    position:absolute; left:0; bottom:0; z-index:10; max-width:96vw; max-height:60vh;
+    overflow:hidden; padding:8px 12px; margin:8px; box-sizing:border-box;
+    background:rgba(0,0,0,0.75); color:#8ef58e; font:12px/1.4 monospace;
+    white-space:pre-wrap; border-radius:4px;
+  }
+  #zenImageWrap { display:none; align-items:center; flex-shrink:0; }
+  #zenImage {
+    height:100%; width:100%; object-fit:contain; border-radius:8px;
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+  }
+</style>
+</head>
+<body>
+  <div id="idleMessage">SHAMA</div>
+  <div id="frame">
+    <div id="pageText"></div>
+    <div id="measure"></div>
+    <div id="zenImageWrap"><img id="zenImage"></div>
+  </div>
+  <!-- TEMPORARY - chrome://inspect never exposes an inspectable target for
+       this TV's Cast receiver process, so this renders our own diagnostic
+       trail directly on screen instead. Remove once cast-to-TV is confirmed
+       working end-to-end. -->
+  <div id="debugOverlay"></div>
+
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<script>
+(function(){
+  var idleMessage = document.getElementById('idleMessage');
+  var frame = document.getElementById('frame');
+  var pageText = document.getElementById('pageText');
+  var measure = document.getElementById('measure');
+  var zenImageWrap = document.getElementById('zenImageWrap');
+  var zenImage = document.getElementById('zenImage');
+  var debugOverlay = document.getElementById('debugOverlay');
+
+  // TEMPORARY - see the HTML comment above #debugOverlay. Keeps the last 15
+  // lines on screen since chrome://inspect isn't giving us a live console.
+  var debugLines = [];
+  function log(msg){
+    var line = new Date().toISOString().slice(11, 19) + ' ' + msg;
+    debugLines.push(line);
+    if (debugLines.length > 15) debugLines.shift();
+    debugOverlay.textContent = debugLines.join('\n');
+  }
+  window.addEventListener('error', function(e){
+    log('window.onerror: ' + (e.message || e.error) + (e.filename ? (' @ ' + e.filename + ':' + e.lineno) : ''));
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    log('unhandledrejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+  });
+  log('script running, waiting for CAF SDK...');
+
+  // Same constants/behavior as index.html's reveal engine (kept in sync by
+  // hand, per the file-level comment above) - see index.html's own
+  // PRELIT_COUNT/COMPLETE_AT_FRACTION comment for why these exact values.
+  var PRELIT_COUNT = 2;
+  var COMPLETE_AT_FRACTION = 0.95;
+  var HIGHLIGHT_COLOR = '#F6CAC0';
+  var FADE_BASE_COLOR = '#d6d6d6';
+  var MAX_F = 68, ABS_MIN = 10;
+
+  var chunks = [];
+  var idx = -1;
+  var shown = false;
+  var chunkSpans = [];
+  var chunkLitCount = 0;
+  var textPreset = 'A';
+  var zenImageList = [];
+  var zenCurrentImageUrl = null;
+  var chapterDuration = 0;
+
+  function fitFontSize(text, availW, availH){
+    measure.style.height = availH + 'px';
+    for (var f = MAX_F; f >= ABS_MIN; f -= 1) {
+      measure.style.fontSize = f + 'px';
+      measure.textContent = text;
+      if (measure.scrollWidth <= availW) return f;
+    }
+    return ABS_MIN;
+  }
+
+  // Fixed once per LOAD (recalcColumns()), not measured per-chunk - a TV's
+  // screen size never changes mid-session, unlike the phone/desktop client
+  // which has to react to resize/fullscreen/rotation. Always reserves the
+  // two-column (text + image) split, even if a chapter turns out to have no
+  // image at all - simpler than the web client's "text gets full width when
+  // there's no image" behavior, and casting is inherently an image-forward
+  // experience anyway.
+  var colW = 0, imgColW = 0, rowH = 0;
+  function recalcColumns(){
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var padH = vw * 0.05, padV = vh * 0.05, gapW = vw * 0.03;
+    var innerW = vw - padH * 2;
+    rowH = vh - padV * 2;
+    var w = (innerW - gapW) / 2;
+    imgColW = Math.max(20, w);
+    colW = Math.max(40, w);
+    zenImageWrap.style.width = imgColW + 'px';
+    zenImageWrap.style.height = rowH + 'px';
+  }
+
+  function showPage(i){
+    var chunk = chunks[i];
+    if (!chunk) return;
+    var f = fitFontSize(chunk.text, colW, rowH);
+    pageText.style.fontSize = f + 'px';
+    pageText.style.opacity = '0';
+    pageText.innerHTML = '';
+    // One span per character, same reason as index.html: per-character
+    // recoloring for the reveal, and Array.from so a surrogate-pair
+    // character never gets split across two spans.
+    chunkSpans = Array.from(chunk.text).map(function(ch){
+      var span = document.createElement('span');
+      span.textContent = ch;
+      pageText.appendChild(span);
+      return span;
+    });
+    // Same forced-reflow workaround as index.html's showPage() - without
+    // it Chromium can keep a stale wrapped-column width from before the
+    // per-character spans went in.
+    pageText.style.display = 'none';
+    void pageText.offsetHeight;
+    pageText.style.display = '';
+    chunkLitCount = Math.min(PRELIT_COUNT, chunkSpans.length);
+    applyInitialSpanState();
+    requestAnimationFrame(function(){ pageText.style.opacity = '1'; });
+  }
+
+  function applyInitialSpanState(){
+    var i;
+    if (textPreset === 'B') {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.color = FADE_BASE_COLOR;
+        chunkSpans[i].style.opacity = (i < PRELIT_COUNT) ? '1' : '0';
+      }
+    } else {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.opacity = '';
+        chunkSpans[i].style.color = (i < chunkLitCount) ? HIGHLIGHT_COLOR : '';
+      }
+    }
+  }
+
+  function updateChunkHighlight(t, chunk){
+    if (!shown || chunkSpans.length === 0) return;
+    var span = chunk.end - chunk.start;
+    var frac = span > 0 ? (t - chunk.start) / span : 1;
+    frac = Math.max(0, Math.min(1, frac));
+    var adjustedFrac = Math.min(1, frac / COMPLETE_AT_FRACTION);
+    var remaining = Math.max(0, chunkSpans.length - PRELIT_COUNT);
+
+    if (textPreset === 'B') {
+      var continuous = adjustedFrac * remaining;
+      for (var i = 0; i < remaining; i++) {
+        chunkSpans[PRELIT_COUNT + i].style.opacity = Math.max(0, Math.min(1, continuous - i));
+      }
+      return;
+    }
+
+    var litCount = Math.min(chunkSpans.length, PRELIT_COUNT + Math.floor(adjustedFrac * remaining));
+    if (litCount === chunkLitCount) return;
+    var j;
+    if (litCount > chunkLitCount) {
+      for (j = chunkLitCount; j < litCount; j++) chunkSpans[j].style.color = HIGHLIGHT_COLOR;
+    } else {
+      for (j = litCount; j < chunkLitCount; j++) chunkSpans[j].style.color = '';
+    }
+    chunkLitCount = litCount;
+  }
+
+  function findChunkIndex(t){
+    var i = 0;
+    for (var k = 0; k < chunks.length; k++) {
+      if (chunks[k].start <= t) i = k; else break;
+    }
+    return i;
+  }
+
+  // A chapter's own N images divide its duration into N equal segments -
+  // same rule as index.html's updateZenImageForTime(). Falls back to the
+  // ID3 cover (pushed into zenImageList by prepareChapter() below when no
+  // folder images exist), and hides the image slot entirely via zenImage's
+  // onerror if even that 404s, rather than showing a broken-image icon.
+  function updateZenImageForTime(t){
+    if (zenImageList.length === 0) return;
+    var url;
+    if (zenImageList.length === 1) {
+      url = zenImageList[0];
+    } else {
+      var frac = chapterDuration > 0 ? Math.min(0.999999, t / chapterDuration) : 0;
+      var segment = Math.max(0, Math.min(zenImageList.length - 1, Math.floor(frac * zenImageList.length)));
+      url = zenImageList[segment];
+    }
+    if (url !== zenCurrentImageUrl) {
+      zenCurrentImageUrl = url;
+      zenImage.src = url;
+    }
+  }
+
+  function updateForTime(t){
+    var newIdx = findChunkIndex(t);
+    if (newIdx !== idx) {
+      idx = newIdx;
+      shown = true;
+      showPage(idx);
+    }
+    updateZenImageForTime(t);
+    if (shown && chunks[idx]) updateChunkHighlight(t, chunks[idx]);
+  }
+
+  zenImage.addEventListener('load', function(){ zenImageWrap.style.display = 'flex'; });
+  zenImage.addEventListener('error', function(){ zenImageWrap.style.display = 'none'; });
+
+  // Fetches sync.json + the chapter's own images in parallel (not
+  // sequential awaits) to keep the LOAD interceptor's delay as small as
+  // possible - both are same-origin API calls the receiver makes directly,
+  // identical to what index.html's openChapter()/loadZenImagesForChapter()
+  // already do, just running on the TV instead of the phone.
+  async function prepareChapter(bookId, chapterBase, preset){
+    textPreset = preset === 'B' ? 'B' : 'A';
+    chunks = [];
+    idx = -1;
+    shown = false;
+    zenImageList = [];
+    zenCurrentImageUrl = null;
+    zenImageWrap.style.display = 'none';
+    pageText.innerHTML = '';
+
+    var syncPromise = fetch('/api/books/' + bookId + '/chapters/' + chapterBase + '/sync')
+      .then(function(res){ return res.json(); })
+      .catch(function(){ return { chunks: [] }; });
+    var imagesPromise = fetch('/api/books/' + bookId + '/chapters/' + chapterBase + '/images')
+      .then(function(res){ return res.json(); })
+      .catch(function(){ return { images: [] }; });
+
+    var results = await Promise.all([syncPromise, imagesPromise]);
+    var syncData = results[0], imgData = results[1];
+
+    chunks = syncData.chunks || [];
+    chapterDuration = chunks.length ? chunks[chunks.length - 1].end : 0;
+
+    (imgData.images || []).forEach(function(name){
+      zenImageList.push('/api/books/' + bookId + '/images/' + name);
+    });
+    if (zenImageList.length === 0) {
+      zenImageList.push('/api/books/' + bookId + '/chapters/' + chapterBase + '/cover');
+    }
+
+    recalcColumns();
+    idleMessage.style.display = 'none';
+    frame.style.display = 'flex';
+    log('prepareChapter done: ' + chunks.length + ' chunks, duration=' + chapterDuration.toFixed(1) + 's');
+  }
+
+  log('CAF SDK present, creating context...');
+  // TEMPORARY - wrapped in try/catch because window.onerror alone only ever
+  // reports a cross-origin-muted "Script error." for exceptions that
+  // propagate through the CAF SDK (loaded from gstatic.com, a different
+  // origin) - this local try/catch still sees the real Error object/message
+  // since the throw happens inside our own call frame.
+  try {
+    var context = cast.framework.CastReceiverContext.getInstance();
+    var playerManager = context.getPlayerManager();
+    log('got context + playerManager');
+
+    // The sender packs {bookId, chapterBase, textPreset} into media.customData
+    // on every loadMedia() call (see index.html's castLoadCurrentChapter()) -
+    // returning a Promise here delays the actual media load until our own
+    // sync/images fetch finishes, so TIME_UPDATE never fires against an empty
+    // chunk list.
+    playerManager.setMessageInterceptor(
+      cast.framework.messages.MessageType.LOAD,
+      function(loadRequestData){
+        // TEMPORARY - logging the FULL object (not just a hand-picked few
+        // fields) since a hand-picked field list already hid the fact that
+        // contentUrl wasn't arriving - something else unexpected could be
+        // hiding the same way.
+        log('LOAD full=' + JSON.stringify(loadRequestData));
+        var custom = (loadRequestData.media && loadRequestData.media.customData) || {};
+        if (!custom.bookId || !custom.chapterBase) {
+          log('LOAD missing customData.bookId/chapterBase - passing through unchanged');
+          return loadRequestData;
+        }
+        return prepareChapter(custom.bookId, custom.chapterBase, custom.textPreset)
+          .then(function(){ return loadRequestData; })
+          .catch(function(e){
+            log('prepareChapter threw: ' + (e && e.message ? e.message : e));
+            return loadRequestData;
+          });
+      }
+    );
+    log('LOAD interceptor registered');
+
+    // TEMPORARY diagnostics - CAF's own media pipeline stage, downstream of
+    // the LOAD interceptor above. If LOAD logs above show up but none of
+    // these do, the failure is inside CAF itself (never even attempting the
+    // actual content fetch), not in our own sync/images/prepareChapter logic.
+    playerManager.addEventListener(cast.framework.events.EventType.ERROR, function(event){
+      log('PLAYER ERROR: ' + JSON.stringify(event));
+    });
+    playerManager.addEventListener(cast.framework.events.EventType.TIME_UPDATE, function(event){
+      if (chunks.length === 0) return;
+      updateForTime(event.currentMediaTime || 0);
+    });
+    log('event listeners registered');
+
+    window.addEventListener('resize', recalcColumns);
+
+    context.start();
+    log('context.start() called');
+  } catch (e) {
+    log('CAF SETUP CRASHED: ' + (e && e.message ? e.message : e) + (e && e.stack ? (' | ' + e.stack.split('\n')[0]) : ''));
+  }
+})();
+</script>
+</body>
+</html>
