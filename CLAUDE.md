@@ -1127,6 +1127,77 @@ plan; this section is the load-bearing summary.
       double-click still toggles playback), and desktop zen in a normal
       window (single tap changes nothing, `chrome-hidden` never applies
       there regardless).
+    - **Book-pill cover art feathered, matching zen mode** - the same
+      rectangular vignette mask zen mode's side image already used
+      (`#zenImage`'s two-linear-gradient, `intersect`/`source-in`
+      composited mask, faded 0-30%/70-100% on both axes) now also
+      applies to `.bookCover`/`.bookCoverPlaceholder` - the home grid's
+      pills and the library screen's art pill both use this same class.
+      Extracted just the mask properties into a shared
+      `#zenImage, .bookCover, .bookCoverPlaceholder` rule (kept separate
+      from `#zenImage`'s own `height`/`width`/`object-fit`/`border-radius`
+      declarations, which stay zen-only) so the setting can't drift
+      between the two - deliberately *not* merging the whole rule, since
+      `#zenImage`'s `width:100%; height:100%;` would otherwise have
+      silently overridden the book covers' own fixed 300x300 sizing
+      (same class-level specificity, later in source order wins on ties).
+    - **Real-fullscreen-only padding bump to 10%/10%** - explicit
+      request scoped to "full screen zen mode" specifically, not desktop
+      zen in general: a wide (>=800px) window already gets `.zen.desktop`
+      (side-image layout) regardless of whether it's actually fullscreen,
+      but only real fullscreen (`.zen.desktop.fullscreen`) now gets the
+      more generous `padding:10vh 10vw` - windowed desktop zen keeps the
+      original, tighter `3vh 3vw`. The new CSS rule's extra `.fullscreen`
+      class gives it higher specificity than the plain `.zen.desktop`
+      rule, so it wins regardless of source order. `recalcZenColumns()`
+      mirrors this with a `document.fullscreenElement` check choosing
+      between `ZEN_DESKTOP_PADDING_*_FRACTION` (3%) and the new
+      `ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION` (10%) before splitting
+      the image/text columns - confirmed via `getComputedStyle()` (70px/
+      100px on a 700x1000 window, exactly 10%) and the resulting column
+      width matching the hand-computed value ((968 - 200 padding - 20
+      gap) / 2 = 374px) precisely, then reverting cleanly to 21px/30px
+      (3%) on exiting fullscreen.
+    - **iPad still had ~1-2% padding after the fix above** - real user
+      report, confirmed by directly reproducing it: `zenCoarsePointerMql`
+      (`pointer: coarse`) is true for any touchscreen, iPad's included,
+      and `applyZenState()`'s `desktopMatch` check explicitly excludes
+      coarse pointers regardless of actual screen width - so an iPad in
+      landscape zen (1080px wide, plenty roomy) still gets routed through
+      the *mobile* code path, never touching the `.zen.desktop.fullscreen`
+      rule above at all. Manually forcing `.zen` without `.desktop` while
+      faking `document.fullscreenElement` reproduced the exact reported
+      symptom (8.1px/21.6px/10.8px - the old 1%/2%/1% mobile numbers).
+      Asked the user whether the fix should be tablet-only or apply to
+      phones too, since Android phones share this same mobile code path
+      and were separately reported as "already good" with their existing
+      small padding, before just changing the shared numbers - answer was
+      all touch devices. Fixed by recognizing mobile zen has no separate
+      "windowed vs fullscreen" state the way desktop does at all - a
+      phone/iPad rotating into zen *is* the fullscreen-equivalent
+      experience (immersive mode and all), so unlike desktop there's
+      nothing to conditionally branch on; `#readerScreen.zen #frame`
+      (the mobile/tablet base rule) simply became a flat `10vh 10vw`
+      unconditionally, replacing the old asymmetric `1vh 2vw 1vh 1vw`
+      (right padding used to be 2x the left, as the side image's own
+      buffer - the explicit new request doesn't distinguish left from
+      right, so this asymmetry was dropped along with the fix).
+      `ZEN_TOP_BOTTOM_FRACTION`/`ZEN_LEFT_FRACTION`/`ZEN_RIGHT_FRACTION`
+      all became `0.10` to match. Desktop's own windowed-vs-fullscreen
+      distinction (3% vs 10%, from the entry above) is untouched.
+      Verified via the same manual-class-simulation technique (81px/108px
+      = exactly 10% of a real 810x1080 iPad-landscape-sized viewport),
+      plus a regression check confirming genuine fine-pointer desktop
+      still gets 3% windowed / 10% fullscreen exactly as before.
+      **Follow-up**: once confirmed working, the user asked to halve
+      every "full screen zen" padding scheme from 10% to 5% (mobile/
+      tablet's flat 10vh/10vw, and desktop's `.zen.desktop.fullscreen`
+      override) - desktop's separate windowed 3vh/3vw was untouched,
+      since it was never part of the 10% scheme being reduced. Same
+      verification approach, same three numbers re-checked at the new
+      value (40.5px/54px = exactly 5% of an 810x1080 viewport, both for
+      mobile and for desktop fullscreen; desktop windowed unchanged at
+      24.3px/32.4px = 3%).
 - **Known limitation, deferred on purpose**: `last_position` is keyed
   only by `book_id` (see `server/src/db.js`) — no per-user/session
   column at all. Fine for a single listener (today's actual usage), but

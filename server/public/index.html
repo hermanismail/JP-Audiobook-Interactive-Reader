@@ -367,18 +367,25 @@
      width alone (>=800px, see applyZenState()) - the .desktop modifier
      distinguishes which sub-case is active for the CSS below, since
      they want different padding/anchoring. */
-  /* Top/bottom padding is 1vh each (1% of screen height) - now that zen
-     mode also hides the status/nav bars (see Android.setImmersiveMode),
-     a true zero here put text/image flush against the physical screen
-     edge, which read as too tight. Right padding is 2vw (image's own
-     buffer from the true right screen edge); left stays 1vw (text's
-     buffer from the true left screen edge, unchanged). The flex gap
-     (text-to-image spacing) is 2vw, up from the previous 1vw - all four
-     numbers kept in sync with ZEN_TOP_BOTTOM_FRACTION/
-     ZEN_RIGHT_FRACTION/ZEN_LEFT_FRACTION/ZEN_GAP_FRACTION in the script
-     below. Mobile/tablet only - see .zen.desktop below for the
-     desktop-specific override. */
-  #readerScreen.zen #frame { padding:1vh 2vw 1vh 1vw; gap:2vw; }
+  /* 5% of screen height top/bottom, 5% of screen width left/right -
+     explicit request (originally 10%, halved after a follow-up request
+     to reduce every zen padding scheme from 10% to 5%), applied
+     unconditionally for mobile/tablet (no separate "windowed vs
+     fullscreen" state exists here the way desktop has both: rotating
+     into zen *is* the fullscreen-equivalent experience on a phone/iPad,
+     immersive mode and all, so there's nothing to distinguish it from).
+     Also fixes a real gap this shipped with: a coarse pointer (iPad's
+     touchscreen included) always routes through this mobile path
+     regardless of actual screen width, so an iPad in landscape zen was
+     still getting the old tiny mobile numbers even in real fullscreen,
+     while only .zen.desktop.fullscreen (below) had been bumped up.
+     Previously asymmetric (right 2vw > left 1vw, for the image's own
+     buffer) - now flat 5vw/5vh per the request, kept in sync with
+     ZEN_TOP_BOTTOM_FRACTION/ZEN_LEFT_FRACTION/ZEN_RIGHT_FRACTION in the
+     script below. Mobile/tablet only - see .zen.desktop below for the
+     desktop-specific override (windowed vs. fullscreen genuinely differ
+     there, so it keeps its own scheme). */
+  #readerScreen.zen #frame { padding:5vh 5vw; gap:2vw; }
 
   /* Right-anchored, not centered: switches #frame's justify-content from
      the normal mode's center to flex-end, so the [text, image] pair packs
@@ -407,6 +414,17 @@
      space (which nothing occupies) changes size. Keeps its own
      symmetric padding scheme, though - just the anchoring changed. */
   #readerScreen.zen.desktop #frame { padding:3vh 3vw; gap:2vw; justify-content:flex-end; }
+  /* Real fullscreen specifically (not just wide-window desktop zen) gets
+     more generous padding - 5% of the screen's own height top/bottom,
+     5% of its width left/right (originally 10%, halved after a
+     follow-up request to reduce every zen padding scheme from 10% to
+     5%) - kept in sync with ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION in
+     the script below (recalcZenColumns() needs the same numbers to size
+     the image/text columns against the right leftover space). Higher
+     specificity (3 classes vs. 2) than the plain .zen.desktop rule
+     above wins regardless of source order once .fullscreen is also
+     present. */
+  #readerScreen.zen.desktop.fullscreen #frame { padding:5vh 5vw; }
 
   /* Chrome-as-overlay in zen mode: #zenChromeOverlay wraps #timeRow/
      #progressTrack/#metaRow. Outside zen it's `display:contents` - inert,
@@ -459,6 +477,15 @@
        next to it) from visibly resizing/repositioning every time a
        differently-shaped image rotates in. */
     height:100%; width:100%; object-fit:contain; border-radius:8px;
+  }
+  /* Rectangular feather, shared with every book-pill cover (home grid +
+     library screen's art pill) - #zenImage is the canonical definition;
+     .bookCover/.bookCoverPlaceholder just ride the same selector so the
+     two settings can never drift apart. Two independent linear
+     gradients (one per axis) composited (`intersect`/`source-in`) give a
+     rectangular fade with sharp corners, not an oval vignette - see the
+     zen mode section of CLAUDE.md for the fuller design note. */
+  #zenImage, .bookCover, .bookCoverPlaceholder {
     -webkit-mask-image:
       linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
       linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
@@ -762,22 +789,25 @@
   var chunkSpans = [];
   var chunkLitCount = 0;
   var PAD_X = 26, PAD_TOP = 64, PAD_BOTTOM = 26, MAX_F = 68, ABS_MIN = 10;
-  // Zen mode's padding, once the status/nav bars also hide (see
-  // Android.setImmersiveMode): 1% of screen height top+bottom, 2% of
-  // screen width for the image's own buffer from the true right screen
-  // edge, 1% of screen width for the text block's buffer from the true
-  // left screen edge, and a 2%-of-width gap between text and image.
-  var ZEN_TOP_BOTTOM_FRACTION = 0.01;
-  var ZEN_LEFT_FRACTION = 0.01;
-  var ZEN_RIGHT_FRACTION = 0.02;
+  // Zen mode's padding on mobile/tablet (any coarse pointer, iPad
+  // included, regardless of its actual screen width - see the CSS
+  // comment on #readerScreen.zen #frame): flat 5% of screen height
+  // top+bottom, 5% of screen width left+right, plus a 2%-of-width gap
+  // between text and image. Kept in sync with that CSS rule.
+  var ZEN_TOP_BOTTOM_FRACTION = 0.05;
+  var ZEN_LEFT_FRACTION = 0.05;
+  var ZEN_RIGHT_FRACTION = 0.05;
   var ZEN_GAP_FRACTION = 0.02;
   // Desktop zen - right-anchored, same as mobile/tablet (see the CSS
   // comment on #readerScreen.zen.desktop #frame for why a centered pair
   // was tried first and reverted), just with its own symmetric padding
   // values instead of mobile's asymmetric ones. Kept in sync with that
-  // CSS rule.
+  // CSS rule. Real fullscreen gets its own, more generous padding (kept
+  // in sync with #readerScreen.zen.desktop.fullscreen #frame instead) -
+  // see recalcZenColumns() below for which one actually applies.
   var ZEN_DESKTOP_PADDING_V_FRACTION = 0.03;
   var ZEN_DESKTOP_PADDING_H_FRACTION = 0.03;
+  var ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION = 0.05;
   var ZEN_DESKTOP_GAP_FRACTION = 0.02;
   var ZEN_DESKTOP_MIN_WIDTH = 800;
 
@@ -1414,9 +1444,17 @@
     var leftPad, rightPad, topBottomPad, gapW;
     if (zenDesktopActive) {
       // Centered pair - symmetric padding, no "leftover space" side.
-      leftPad = vw * ZEN_DESKTOP_PADDING_H_FRACTION;
+      // Real fullscreen gets the more generous 10%/10% padding; a wide
+      // window that isn't actually fullscreen keeps the tighter 3%/3%.
+      var desktopPadFraction = document.fullscreenElement
+        ? ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION
+        : ZEN_DESKTOP_PADDING_H_FRACTION;
+      var desktopPadVFraction = document.fullscreenElement
+        ? ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION
+        : ZEN_DESKTOP_PADDING_V_FRACTION;
+      leftPad = vw * desktopPadFraction;
       rightPad = leftPad;
-      topBottomPad = vh * ZEN_DESKTOP_PADDING_V_FRACTION;
+      topBottomPad = vh * desktopPadVFraction;
       gapW = vw * ZEN_DESKTOP_GAP_FRACTION;
     } else {
       leftPad = vw * ZEN_LEFT_FRACTION;
