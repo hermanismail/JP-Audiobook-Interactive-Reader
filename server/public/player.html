@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&family=Special+Elite&display=swap" rel="stylesheet">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230b0b0d'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Roboto, Arial, sans-serif' font-weight='700' font-size='20' fill='%23e08a3c'%3ES%3C/text%3E%3C/svg%3E">
 <title>SHAMA Player</title>
 <!--
@@ -84,6 +84,17 @@
   #forceZenBtn.active { border-color:var(--accent); color:var(--accent); }
   @media (pointer: coarse) { #fullscreenToggleBtn { display:none; } }
   @media (pointer: fine) { #forceZenBtn { display:none; } }
+  /* Left of the zen/fullscreen slot, same 44px spacing as the rest of
+     this row (16/60/104/148/192). Plain "C" glyph like presetToggleBtn's
+     "あ" - explicit Roboto since .iconBtn's font-family:inherit would
+     otherwise just pick up whatever body/readerScreen happen to cascade
+     down, not necessarily Roboto. color:var(--ink) (inherited from
+     .iconBtn) already flips with the dark/light theme same as every
+     other icon here - no extra theme-specific rule needed. */
+  /* No .active/highlighted state - like presetToggleBtn ("あ"), this
+     button's own appearance never changes; it just cycles the mode
+     silently on each click (off/animated/static/remote - see the JS). */
+  #subtitleToggleBtn { position:absolute; top:16px; right:192px; z-index:5; font-family:"Roboto","Arial",sans-serif; font-size:15px; font-weight:700; }
 
   #volumePopup {
     display:none; flex-direction:column; gap:10px;
@@ -98,11 +109,40 @@
   #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; white-space:normal; overflow-wrap:anywhere; }
   #loadingOverlay { display:none; color:var(--muted); font-size:14px; text-align:center; }
 
+  /* Fixed-position overlay (see the HTML comment on this element for why
+     it lives outside #readerScreen), JS-positioned against #frame's own
+     bottom edge each time it's shown - see positionSubtitleOverlay().
+     Deliberately not gated by chrome-hidden/#zenChromeOverlay - a
+     translation aid is core reading content, not a control, so it stays
+     visible in zen mode even while the icon row/progress bar are
+     hidden, same as the vertical text itself never hides.
+     pointer-events:none so it never intercepts the tap/swipe gestures
+     the reading area underneath it relies on. */
+  #subtitleOverlay {
+    display:none; position:fixed; left:0; right:0; z-index:4; pointer-events:none;
+    box-sizing:border-box; padding:6px 5%; text-align:center;
+    white-space:normal; overflow-wrap:anywhere; overflow:hidden;
+    font-family:'Special Elite', monospace; color:var(--ink);
+  }
+  #subtitleOverlay.show { display:block; }
+  /* Scoped to only the per-word spans showSubtitleCue() creates INSIDE
+     #subtitleText, not #subtitleOverlay span generally - #subtitleText
+     is itself a <span> (a direct child of #subtitleOverlay), so a bare
+     "#subtitleOverlay span" selector matched it too and left it stuck at
+     opacity:0 forever (no code ever sets ITS opacity, only its
+     children's) - every word inside it was correctly fading in, just
+     invisible behind its own permanently-transparent wrapper. This was
+     the real cause of the text-never-paints symptom chased earlier via
+     the ancestry/compositing investigation below - a plain cascade bug,
+     not a paint/compositing one. */
+  #subtitleText > span { opacity:0; transition:opacity 0.15s linear; }
+
   #readerScreen.chrome-hidden #readerTopBar,
   #readerScreen.chrome-hidden #presetToggleBtn,
   #readerScreen.chrome-hidden #themeToggleBtn,
   #readerScreen.chrome-hidden #fullscreenToggleBtn,
   #readerScreen.chrome-hidden #forceZenBtn,
+  #readerScreen.chrome-hidden #subtitleToggleBtn,
   #readerScreen.chrome-hidden #volumeToggleBtn,
   #readerScreen.chrome-hidden #volumePopup { display:none; }
   #readerScreen.chrome-hidden #zenChromeOverlay { display:none !important; }
@@ -221,6 +261,7 @@
   <button id="forceZenBtn" class="iconBtn" aria-label="Toggle zen mode">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
   </button>
+  <button id="subtitleToggleBtn" class="iconBtn" aria-label="Toggle translation subtitle">C</button>
   <button id="themeToggleBtn" class="iconBtn" aria-label="Toggle light/dark theme">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
   </button>
@@ -303,6 +344,20 @@
   <audio id="audio"></audio>
 </div>
 
+<!-- Declared as a direct child of <body> (not nested inside #readerScreen)
+     so it's positioned via JS (see positionSubtitleOverlay()) against
+     #frame's own bottom edge as a plain position:fixed overlay, rather
+     than needing to be a flex child of #readerScreen's own column.
+     (An earlier debugging pass chased the text never painting here as a
+     suspected ancestry/compositing bug and moved the markup outside
+     #readerScreen as a workaround - the real cause, found afterward, was
+     mundane: the CSS selector `#subtitleOverlay span` also matched
+     #subtitleText itself, since it's a <span> too, pinning it at
+     opacity:0 forever regardless of its children's own opacity. See the
+     `#subtitleText > span` rule above. The body-level placement was kept
+     anyway since it's a perfectly correct design on its own merits.) -->
+<div id="subtitleOverlay"><span id="subtitleText"></span></div>
+
 <div id="sessionEndedScreen">
   <div id="sessionEndedTitle">SHAMA</div>
   <div id="sessionEndedSubtitle">Time to go home...</div>
@@ -359,6 +414,9 @@
   var themeToggleBtn = document.getElementById('themeToggleBtn');
   var fullscreenToggleBtn = document.getElementById('fullscreenToggleBtn');
   var forceZenBtn = document.getElementById('forceZenBtn');
+  var subtitleToggleBtn = document.getElementById('subtitleToggleBtn');
+  var subtitleOverlay = document.getElementById('subtitleOverlay');
+  var subtitleText = document.getElementById('subtitleText');
   var zenImageWrap = document.getElementById('zenImageWrap');
   var zenImage = document.getElementById('zenImage');
 
@@ -431,6 +489,12 @@
   // fixed px clearance (same value as the non-zen mode's own PAD_TOP,
   // which exists for the identical reason) - see recalcZenColumns().
   var ZEN_CHROME_TOP_CLEARANCE = PAD_TOP;
+
+  // Flat height reserved at the bottom of the reading area for the
+  // subtitle overlay whenever it's toggled on - one fixed number rather
+  // than measuring the actual current cue, so the vertical text/zen image
+  // don't resize every time a cue appears or disappears.
+  var SUBTITLE_RESERVED_H = 44;
 
   var zenActive = false;
   var zenDesktopActive = false;
@@ -577,6 +641,18 @@
     frame.style.paddingBottom = topBottomPad + 'px';
     frame.style.paddingLeft = leftPad + 'px';
     frame.style.paddingRight = rightPad + 'px';
+    // Reserve room at the bottom for the subtitle overlay via MARGIN, not
+    // padding - #frame is `flex:1; box-sizing:border-box`, so its real
+    // on-screen box size comes purely from flex layout regardless of its
+    // own padding value; only margin actually shrinks that allotted box
+    // (confirmed via a live test - padding here left the overlay
+    // overlapping the progress bar instead of sitting above it). This
+    // matters even in zen: whenever chrome is visible without being
+    // hidden-and-absolutely-overlaid (desktop zen, windowed, non-
+    // fullscreen), #timeRow/#progressTrack/#metaRow are still real flex
+    // siblings sharing the column with #frame, same as non-zen mode - see
+    // applyNonZenSubtitlePadding()'s comment for the fuller explanation.
+    frame.style.marginBottom = subtitlesShowOnPlayer() ? SUBTITLE_RESERVED_H + 'px' : '';
 
     var innerW = frame.clientWidth - leftPad - rightPad;
     var imgH = frame.clientHeight - topPad - topBottomPad;
@@ -590,12 +666,38 @@
 
   // Clears the inline padding recalcZenColumns() sets above, so leaving
   // zen falls back to the plain CSS rule (#frame { padding:64px 26px
-  // 26px }) instead of being stuck with zen's last computed values.
+  // 26px }) instead of being stuck with zen's last computed values. The
+  // trailing call re-derives margin-bottom (zen's own subtitle
+  // reservation is also margin, cleared along with everything else above)
+  // for whichever state non-zen mode should be in.
   function resetZenFramePadding(){
     frame.style.paddingTop = '';
     frame.style.paddingBottom = '';
     frame.style.paddingLeft = '';
     frame.style.paddingRight = '';
+    applyNonZenSubtitlePadding();
+  }
+
+  // Non-zen mode's #frame padding is otherwise pure static CSS (never
+  // touched by JS). Reserving space here needs MARGIN, not padding:
+  // #frame is a `flex:1; box-sizing:border-box` item, so its actual
+  // on-screen (border-box) size is whatever the flex layout hands it,
+  // completely independent of its own padding - padding-bottom would
+  // only shrink the *inner* content area, leaving frame's real bottom
+  // edge (and the fixed-position subtitle overlay anchored to it via
+  // positionSubtitleOverlay()) exactly where it always was, overlapping
+  // the progress bar below instead of leaving a gap above it (confirmed
+  // via a live browser test - the overlay rendered UNDER the seek bar).
+  // Margin, unlike padding, IS subtracted before flex-grow distributes
+  // space, so it actually pushes frame's real bottom edge upward and
+  // opens genuine screen space for the overlay to occupy. No-op while
+  // zen is active - zen's own #frame padding legitimately reserves space
+  // there instead, since frame fills the *entire* screen in zen
+  // (the progress/meta rows become an absolutely-positioned overlay,
+  // not real flex siblings, once chrome is hidden - see recalcZenColumns()).
+  function applyNonZenSubtitlePadding(){
+    if (zenActive) return;
+    frame.style.marginBottom = subtitlesShowOnPlayer() ? SUBTITLE_RESERVED_H + 'px' : '';
   }
 
   // Re-derives the zen column layout and re-fits the current page against
@@ -608,10 +710,16 @@
     recalcZenColumns();
     if (shown && idx >= 0) showPage(idx);
     updateZenImageForTime(audio.currentTime || 0);
+    if (subtitleOverlay.classList.contains('show')) positionSubtitleOverlay();
   }
 
   function getAvailableSpace(){
     if (!zenActive || zenImageWrap.style.display === 'none') {
+      // No extra subtraction needed here for the subtitle reservation -
+      // applyNonZenSubtitlePadding() below reserves it via frame's own
+      // margin-bottom, which actually shrinks frame.clientHeight itself
+      // (unlike padding, which box-sizing:border-box would have absorbed
+      // invisibly - see that function's comment for why margin was needed).
       return {
         w: frame.clientWidth - PAD_X * 2,
         h: frame.clientHeight - PAD_TOP - PAD_BOTTOM
@@ -701,6 +809,7 @@
     if (zenActive) recalcZenColumns();
     if (shown && idx >= 0) showPage(idx);
     updateZenImageForTime(audio.currentTime || 0);
+    if (subtitleOverlay.classList.contains('show')) positionSubtitleOverlay();
   }
 
   if (zenMql.addEventListener) zenMql.addEventListener('change', applyZenState);
@@ -733,6 +842,7 @@
       recalcZenColumns();
       if (shown && idx >= 0) showPage(idx);
       updateZenImageForTime(audio.currentTime || 0);
+      if (subtitleOverlay.classList.contains('show')) positionSubtitleOverlay();
       requestMobileFullscreen(); // most reliable when this IS a genuine user gesture (the local button click)
       if (audio.paused) audio.play();
     } else {
@@ -809,6 +919,222 @@
   var HIGHLIGHT_COLOR, FADE_BASE_COLOR;
   var PRELIT_COUNT = 2;
   var COMPLETE_AT_FRACTION = 0.95;
+
+  // --- Translation subtitle overlay: an optional per-chapter .srt file
+  // (chapter_NNN.srt alongside the audio - no reference to it in
+  // book.json/sync.json, it's just present or it isn't), rendered as a
+  // single-line caption in the gap between the reading area and the
+  // progress bar. Runs on its own timeline (the .srt file's own cue
+  // start/end times), entirely independent of the karaoke engine above
+  // (sync.json's chunks) - but its "animated" mode deliberately reuses
+  // that engine's exact fade-preset math (COMPLETE_AT_FRACTION) so the
+  // two reveal styles feel like the same design language, per explicit
+  // request.
+  //
+  // #subtitleToggleBtn ("C") cycles four global (localStorage, not
+  // per-book - same pattern as textPreset/theme) modes on every click,
+  // same as presetToggleBtn (see setTextPreset() above) - a plain click
+  // toggle with NO active/highlighted visual state of its own, the
+  // button glyph never changes:
+  //   off -> animated -> static -> remote -> off -> ...
+  // "animated"/"static" show the overlay locally, exactly like before
+  // except static skips the per-word fade and just shows the whole cue
+  // at once. "remote" shows nothing on THIS device at all - cue text is
+  // broadcast over the existing WS state channel instead (see
+  // reportState() below) for remote.html to render in the image-swap
+  // area, per its own "C" toggle.
+  var SUBTITLE_MODES = ['off', 'animated', 'static', 'remote'];
+  var subtitleMode = 'off';
+  try {
+    var storedSubtitleMode = localStorage.getItem('subtitleMode');
+    if (SUBTITLE_MODES.indexOf(storedSubtitleMode) >= 0) subtitleMode = storedSubtitleMode;
+  } catch(e){}
+  function subtitlesShowOnPlayer(){ return subtitleMode === 'animated' || subtitleMode === 'static'; }
+
+  var subtitleCues = []; // [{start,end,text}], seconds
+  var subtitleLoadToken = 0; // guards a slow-arriving fetch from a chapter already left
+  var subtitleCueIndex = -1;
+  var subtitleWordSpans = [];
+  var currentSubtitleText = ''; // current cue's text regardless of mode - what "remote" mode broadcasts
+  var currentSubtitleCueStart = 0, currentSubtitleCueEnd = 0; // sent alongside currentSubtitleText so remote.html can drive its own word-fade off the same cue timing
+  var SUBTITLE_FONT_SIZE = 24; // flat size (px) - see showSubtitleCue()
+
+  function parseSrtTime(s){
+    var m = s.match(/(\d+):(\d\d):(\d\d)[,.](\d+)/);
+    if (!m) return 0;
+    return (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 1000;
+  }
+
+  // Minimal SRT parser: index line, "start --> end" (HH:MM:SS,mmm), one
+  // or more text lines, blank-line separated. Multi-line cues are joined
+  // with a space - the overlay wraps to as many lines as it needs.
+  function parseSrt(text){
+    var cues = [];
+    var blocks = text.replace(/\r/g, '').split(/\n\n+/);
+    for (var i = 0; i < blocks.length; i++) {
+      var lines = blocks[i].split('\n').filter(function(l){ return l.trim() !== ''; });
+      if (lines.length < 2) continue;
+      var timeLineIdx = lines[0].indexOf('-->') >= 0 ? 0 : 1;
+      var timeLine = lines[timeLineIdx];
+      if (timeLine.indexOf('-->') < 0) continue;
+      var parts = timeLine.split('-->');
+      var cueText = lines.slice(timeLineIdx + 1).join(' ').trim();
+      if (!cueText) continue;
+      cues.push({ start: parseSrtTime(parts[0]), end: parseSrtTime(parts[1]), text: cueText });
+    }
+    return cues;
+  }
+
+  // Fire-and-forget (not part of the main Promise.all in openChapter) -
+  // most chapters won't have a .srt at all, so this shouldn't slow down
+  // the critical path of getting audio/text on screen. Toggling
+  // subtitles on before this resolves just shows nothing until it does.
+  async function loadSubtitleForChapter(id, base){
+    var myToken = ++subtitleLoadToken;
+    subtitleCues = [];
+    subtitleCueIndex = -1;
+    currentSubtitleText = '';
+    hideSubtitleOverlay();
+    try {
+      var res = await fetch('/api/books/' + id + '/chapters/' + base + '/subtitle');
+      if (!res.ok || myToken !== subtitleLoadToken) return;
+      var text = await res.text();
+      if (myToken !== subtitleLoadToken) return;
+      subtitleCues = parseSrt(text);
+    } catch (e) {}
+  }
+
+  function hideSubtitleOverlay(){
+    subtitleOverlay.classList.remove('show');
+    subtitleText.innerHTML = '';
+    subtitleWordSpans = [];
+  }
+
+  // #subtitleOverlay is position:fixed (see the HTML comment on it for
+  // why it can't just be a normal flex child of #readerScreen) - this is
+  // what actually anchors it to the real gap below #frame, whose own
+  // bottom padding is independently bumped by SUBTITLE_RESERVED_H
+  // (recalcZenColumns()/getAvailableSpace()) whenever subtitles are on,
+  // so the reading text/zen image never render underneath it.
+  function positionSubtitleOverlay(){
+    subtitleOverlay.style.top = frame.getBoundingClientRect().bottom + 'px';
+  }
+
+  // #frame's viewport position shifts on any resize (even in non-zen
+  // mode, where its padding is a fixed px value, not viewport-relative)
+  // - reposition a currently-visible cue rather than leaving it stranded
+  // wherever #frame used to end.
+  window.addEventListener('resize', function(){
+    if (subtitleOverlay.classList.contains('show')) positionSubtitleOverlay();
+  });
+
+  function showSubtitleCue(cue){
+    // Flat size instead of a dynamic fit - that was swinging too small/
+    // too large cue to cue. #subtitleOverlay wraps (white-space:normal)
+    // within its own 5%-each-side padding rather than needing to fit a
+    // single line, so a flat size never needs to overflow the screen.
+    subtitleText.style.fontSize = SUBTITLE_FONT_SIZE + 'px';
+    subtitleText.innerHTML = '';
+    var words = cue.text.split(/\s+/).filter(Boolean);
+    subtitleWordSpans = [];
+    words.forEach(function(w, i){
+      var span = document.createElement('span');
+      span.textContent = w;
+      subtitleText.appendChild(span);
+      subtitleWordSpans.push(span);
+      if (i < words.length - 1) subtitleText.appendChild(document.createTextNode(' '));
+    });
+    // "static" mode: show the whole cue at once, no per-word fade -
+    // updateSubtitleWordFade() (which drives the per-word opacity ramp)
+    // is only ever called for "animated" mode, so without this the words
+    // would just sit at their CSS default opacity:0 forever.
+    if (subtitleMode === 'static') {
+      subtitleWordSpans.forEach(function(span){ span.style.opacity = '1'; });
+    }
+    positionSubtitleOverlay();
+    subtitleOverlay.classList.add('show');
+  }
+
+  // Exact same fade-preset formula as updateChunkHighlight()'s preset-B
+  // branch (continuous opacity ramp over COMPLETE_AT_FRACTION of the
+  // cue's own duration), just applied per-word instead of per-character
+  // and with no "pre-lit" head start (a whole word appearing has more
+  // visual weight than a single character, so there's less need to
+  // soften the very start the way the character version does).
+  function updateSubtitleWordFade(t, cue){
+    if (!subtitleWordSpans.length) return;
+    var span = cue.end - cue.start;
+    var frac = span > 0 ? (t - cue.start) / span : 1;
+    frac = Math.max(0, Math.min(1, frac));
+    var adjustedFrac = Math.min(1, frac / COMPLETE_AT_FRACTION);
+    var n = subtitleWordSpans.length;
+    var continuous = adjustedFrac * n;
+    for (var i = 0; i < n; i++) {
+      subtitleWordSpans[i].style.opacity = Math.max(0, Math.min(1, continuous - i));
+    }
+  }
+
+  function findSubtitleCueIndex(t){
+    for (var i = 0; i < subtitleCues.length; i++) {
+      if (t >= subtitleCues[i].start && t < subtitleCues[i].end) return i;
+    }
+    return -1;
+  }
+
+  // Returns true iff the current cue changed (index-wise) this call -
+  // the timeupdate handler uses that to force an immediate WS state push
+  // (see reportState()) rather than waiting for its normal ~1/sec
+  // throttle, so a remote-mode caption changes lines promptly.
+  function updateSubtitleForTime(t){
+    if (subtitleMode === 'off' || !subtitleCues.length) {
+      if (subtitleCueIndex === -1) return false;
+      subtitleCueIndex = -1;
+      currentSubtitleText = '';
+      currentSubtitleCueStart = currentSubtitleCueEnd = 0;
+      hideSubtitleOverlay();
+      return true;
+    }
+    var newIndex = findSubtitleCueIndex(t);
+    var changed = newIndex !== subtitleCueIndex;
+    if (changed) {
+      subtitleCueIndex = newIndex;
+      var cue = newIndex >= 0 ? subtitleCues[newIndex] : null;
+      currentSubtitleText = cue ? cue.text : '';
+      currentSubtitleCueStart = cue ? cue.start : 0;
+      currentSubtitleCueEnd = cue ? cue.end : 0;
+      // Only "animated"/"static" touch the local overlay's DOM at all -
+      // "remote" mode deliberately shows nothing on this device, just
+      // updates currentSubtitleText above for reportState() to send on.
+      if (subtitlesShowOnPlayer()) {
+        if (cue) showSubtitleCue(cue); else hideSubtitleOverlay();
+      }
+    }
+    if (subtitleMode === 'animated' && newIndex >= 0) updateSubtitleWordFade(t, subtitleCues[newIndex]);
+    return changed;
+  }
+
+  // Shared by the local "C" button AND a remote `toggleSubtitle` command
+  // (remote.html's own new "C" button - same mechanism as toggleForceZen()
+  // above) - advances the shared four-mode cycle one step either way.
+  function advanceSubtitleMode(){
+    var i = SUBTITLE_MODES.indexOf(subtitleMode);
+    subtitleMode = SUBTITLE_MODES[(i + 1) % SUBTITLE_MODES.length];
+    try { localStorage.setItem('subtitleMode', subtitleMode); } catch(e){}
+
+    // Mode change affects how much bottom space #frame reserves on THIS
+    // device (only animated/static reserve any - remote and off don't) -
+    // re-derive it (zen's own column math, or the plain non-zen padding)
+    // and re-fit the currently shown page against the new space
+    // immediately, rather than waiting for the next resize/page turn.
+    if (zenActive) recalcZenColumns(); else applyNonZenSubtitlePadding();
+    if (shown && idx >= 0) showPage(idx);
+
+    hideSubtitleOverlay();
+    subtitleCueIndex = -1; // force a fresh evaluation against the current time
+    updateSubtitleForTime(audio.currentTime || 0);
+    reportState(true); // push the new mode/cue to remote.html immediately
+  }
+  subtitleToggleBtn.addEventListener('click', advanceSubtitleMode);
 
   var textPreset = 'A';
   try { textPreset = localStorage.getItem('textPreset') || 'A'; } catch(e){}
@@ -967,12 +1293,20 @@
     var t = audio.currentTime;
     if (isNaN(t)) return;
     updateForTime(t);
-    reportState(false);
+    var subtitleCueChanged = updateSubtitleForTime(t);
+    reportState(subtitleCueChanged);
   });
 
   audio.addEventListener('ended', function(){
     var currentIndex = allChapters.indexOf(chapterBase);
     if (currentIndex >= 0 && currentIndex + 1 < allChapters.length) {
+      // Reset the just-finished chapter's saved position back to 0 -
+      // otherwise it's left parked right at (or past) its own duration,
+      // and reopening that chapter later would resume there and
+      // immediately re-fire 'ended' on its own, auto-advancing again
+      // before the user ever hears anything - an endless-loop trap
+      // instead of actually replaying the chapter from the start.
+      putLastPosition(bookId, chapterBase, 0);
       openChapter(bookId, allChapters[currentIndex + 1]);
     }
   });
@@ -1306,6 +1640,8 @@
     pageText.style.display = 'none';
     loadingOverlay.style.display = 'block';
 
+    loadSubtitleForChapter(id, base); // fire-and-forget - see the function's own comment
+
     // If the caller didn't already know a resume time (goNextChapter/
     // goPrevChapter/the 'ended' auto-advance handler all just open the
     // neighboring chapter with no third argument), look up that specific
@@ -1346,6 +1682,7 @@
     pageText.style.display = 'flex';
 
     applyZenState();
+    applyNonZenSubtitlePadding(); // applyZenState() is a no-op when staying non-zen, so this covers that case explicitly
 
     audio.src = '/api/books/' + id + '/chapters/' + base + '/audio';
     audio.playbackRate = currentSpeed;
@@ -1381,12 +1718,19 @@
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
   }
 
-  function persistLastPosition(t){
-    if (!bookId || !chapterBase) return;
-    fetch('/api/books/' + bookId + '/last-position', {
+  // Takes explicit id/base params (rather than always reading the current
+  // globals) so a just-finished chapter's position can be reset even
+  // after chapterBase has already moved on to the next chapter - see the
+  // 'ended' handler below.
+  function putLastPosition(id, base, t){
+    if (!id || !base) return;
+    fetch('/api/books/' + id + '/last-position', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chapterBase: chapterBase, positionSeconds: t })
+      body: JSON.stringify({ chapterBase: base, positionSeconds: t })
     }).catch(function(){});
+  }
+  function persistLastPosition(t){
+    putLastPosition(bookId, chapterBase, t);
   }
 
   var lastReportedSecond = -1;
@@ -1403,7 +1747,16 @@
       paused: audio.paused,
       preset: textPreset, theme: theme, zenActive: !!zenActive, speed: currentSpeed,
       chapterIndex: chapterNumber(chapterBase) || 0, totalChapters: chapterTotalCount(),
-      partIndex: idx + 1, totalParts: chunks.length
+      partIndex: idx + 1, totalParts: chunks.length,
+      // remote.html only actually acts on these while subtitleMode is
+      // 'remote' (see its own "C" toggle) - sent unconditionally here
+      // since it's cheap and keeps the two sides in sync regardless of
+      // which one changes mode first. Cue start/end let remote.html drive
+      // its own word-by-word fade off the same timing as player.html's
+      // own "animated" mode (see updateSubtitleWordFade()), rather than
+      // just snapping the whole cue in at once.
+      subtitleMode: subtitleMode, subtitleText: currentSubtitleText,
+      subtitleCueStart: currentSubtitleCueStart, subtitleCueEnd: currentSubtitleCueEnd
     });
   }
 
@@ -1433,6 +1786,7 @@
         break;
       case 'setVolume': setVolumeLevel(Math.round((msg.value || 0) * 100)); break;
       case 'toggleZen': toggleForceZen(); break;
+      case 'toggleSubtitle': advanceSubtitleMode(); break;
       case 'setSpeed': setSpeed(msg.value); break;
     }
   }

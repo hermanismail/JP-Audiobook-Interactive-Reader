@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&family=Special+Elite&display=swap" rel="stylesheet">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230b0b0d'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Roboto, Arial, sans-serif' font-weight='700' font-size='20' fill='%23e08a3c'%3ES%3C/text%3E%3C/svg%3E">
 <title>SHAMA Remote</title>
 <!--
@@ -106,10 +106,19 @@
   /* Width-matched to #coverWrap (also 80u, also margin:0 auto) rather
      than stretched to the full content column, so the leftmost/rightmost
      icons land flush with the cover image's own left/right edges instead
-     of spreading wider than it. */
+     of spreading wider than it. order:-1 pulls it ahead of #coverWrap in
+     the stacked (portrait/desktop) layout - it's DOM-after cover/title/
+     author (see the HTML comment on #landscapeColLeft/Right) purely so
+     mobile-landscape's real #landscapeColRight column groups it with the
+     pills/controls rather than the cover; order only affects visual
+     position within a flex container, so this has no effect there (it's
+     already that column's first child) - it only changes the stacked
+     layout, where all these elements are flattened into one flex column
+     and previously fell back to plain DOM order. */
   #topIcons {
     display:flex; justify-content:space-between; align-items:center;
     width:calc(80 * var(--u)); margin:0 auto calc(1.5 * var(--u));
+    order:-1;
   }
   #topIcons .iconBtn { width:calc(9.2 * var(--u)); height:calc(9.2 * var(--u)); }
   #topIcons .iconBtn svg { width:calc(4.6 * var(--u)); height:calc(4.6 * var(--u)); }
@@ -124,6 +133,58 @@
     background:var(--panel-bg-2);
   }
   #coverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:calc(10 * var(--u)); }
+  /* Swapped in for the cover/title/author block (all hidden, see the
+     subtitle-mode rules below) whenever the active device's subtitleMode
+     is 'remote' - see renderNowPlaying() and fitCoverSubtitleText(). A
+     sibling of #coverWrap, not nested inside it - it needs to span the
+     full content column width (see width:100% below), not just the
+     square cover box, per explicit request ("fill the available screen
+     width with 5% padding on each side"); nesting it inside #coverWrap
+     would still cap it at that box's own (narrower, identity-block-
+     matched) width. left-aligned (justify-content:flex-start for the
+     block itself, text-align:left for wrapped lines within it), height
+     fixed at 1.2x #coverWrap's own height at each breakpoint (96u here,
+     matching the 80u default below - see the mobile-breakpoint override
+     further down for the 72u case) - both explicit request values.
+     font-size shrunk to fit via JS (fitCoverSubtitleText()) rather than a
+     single-line width-only fit like player.html's overlay, since this is
+     a wide, short box a caption would otherwise barely use - wrapping to
+     multiple lines and fitting both axes makes better use of the space. */
+  #coverSubtitleText {
+    display:none; width:100%; height:calc(96 * var(--u)); box-sizing:border-box;
+    margin:0 auto calc(2 * var(--u));
+    border-radius:calc(3 * var(--u)); background:none;
+    padding:2% 5%; align-items:center; justify-content:flex-start; text-align:left;
+    font-family:'Special Elite', monospace; color:var(--ink);
+    overflow:hidden; white-space:normal; overflow-wrap:anywhere;
+  }
+  /* #coverSubtitleTextInner is a plain (non-flex) span holding the actual
+     word spans + space text nodes - #coverSubtitleText itself must stay
+     display:flex for vertical centering, but making the word spans ITS
+     direct children would make each WORD its own flex item (confirmed
+     via live testing: flex items get their own shrink/min-width
+     independent of each other, and overflow-wrap:anywhere then breaks
+     each narrow item mid-word - "The person who" rendered as a vertical
+     stack of single letters). Routing them through one plain inline
+     wrapper instead means #coverSubtitleText has exactly one flex item,
+     and normal inline text flow/wrapping happens *inside* it, same as
+     player.html's #subtitleText inside #subtitleOverlay. Selector is
+     scoped two levels deep (not "#coverSubtitleText > span", which would
+     match #coverSubtitleTextInner itself) for the same reason player.html's
+     own fix needed it: never opacity-gate the wrapper, only its words. */
+  #coverSubtitleTextInner > span { opacity:0; transition:opacity 0.15s linear; }
+  /* subtitle-mode toggles on #landscapeColLeft (the shared ancestor of
+     cover/title/author), not #coverWrap itself, so the same flag can also
+     hide #titleText/#authorText below - the whole identity block steps
+     aside for the caption, not just the cover image. #coverWrap itself
+     also has to hide now (not just its coverImg/coverPlaceholder
+     children) - it has its own explicit width/height, so it wouldn't
+     collapse away on its own and would leave an empty square block
+     sitting above #coverSubtitleText otherwise. */
+  #landscapeColLeft.subtitle-mode #coverWrap { display:none; }
+  #landscapeColLeft.subtitle-mode #coverSubtitleText { display:flex; }
+  #landscapeColLeft.subtitle-mode #titleText,
+  #landscapeColLeft.subtitle-mode #authorText { display:none; }
   #coverImg, #coverPlaceholder {
     -webkit-mask-image:
       linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
@@ -212,6 +273,11 @@
   #volumeRow .iconBtn svg { width:calc(2.4 * var(--u)); height:calc(2.4 * var(--u)); }
   #volDownBtn, #volUpBtn { font-size:calc(2.6 * var(--u)); }
   #volumeLevelPill { width:auto; min-width:calc(3.6 * var(--u)); padding:0 calc(0.8 * var(--u)); font-size:calc(2.2 * var(--u)); font-weight:600; cursor:default; }
+  /* Same iconBtn sizing as its #volumeRow siblings (see the rules just
+     above) - no separate width/height rule needed. No .active/highlighted
+     state, like player.html's own "C" button - it just relays a
+     toggleSubtitle command, the button's own look never changes. */
+  #subtitleToggleBtn { font-family:"Roboto","Arial",sans-serif; font-size:calc(2.6 * var(--u)); font-weight:700; }
 
   .devicePillCol { display:flex; flex-direction:column; align-items:center; gap:calc(1 * var(--u)); width:100%; }
   .pillIconRow { display:flex; align-items:center; justify-content:center; gap:calc(0.8 * var(--u)); width:100%; }
@@ -239,6 +305,8 @@
   @media (max-width:785.98px), (pointer:coarse) and (orientation:landscape) {
     /* Cover -10% (80u -> 72u). */
     #coverWrap { width:calc(72 * var(--u)); height:calc(72 * var(--u)); }
+    /* Matches #coverWrap's own -10% step above, still 1.2x it (86.4u). */
+    #coverSubtitleText { height:calc(86.4 * var(--u)); }
 
     /* Top icon row re-anchored to the seek bar's own edges instead of the
        cover image's (both #topIcons and #progressTrack are width:100% of
@@ -274,6 +342,7 @@
     #volumeRow .iconBtn svg { width:calc(5.4 * var(--u)); height:calc(5.4 * var(--u)); }
     #volDownBtn, #volUpBtn { font-size:calc(5.4 * var(--u)); }
     #volumeLevelPill { font-size:calc(4.62 * var(--u)); }
+    #subtitleToggleBtn { font-size:calc(5.4 * var(--u)); }
 
     #pillRow { margin-bottom:10px; } /* chapter/speed pills -> seek bar, flat 5px+5px gap */
 
@@ -396,6 +465,7 @@
     <img id="coverImg" style="display:none;">
     <div id="coverPlaceholder">&#9834;</div>
   </div>
+  <div id="coverSubtitleText"><span id="coverSubtitleTextInner"></span></div>
   <div id="titleText"></div>
   <div id="authorText"></div>
   </div>
@@ -461,6 +531,7 @@
   </div>
 
   <div id="volumeRow">
+    <button id="subtitleToggleBtn" class="iconBtn" aria-label="Toggle translation subtitle">C</button>
     <button id="volDownBtn" class="iconBtn" aria-label="Decrease volume">&minus;</button>
     <div id="volumeLevelPill" class="iconBtn">100</div>
     <button id="volUpBtn" class="iconBtn" aria-label="Increase volume">+</button>
@@ -529,8 +600,13 @@
   var presetToggleBtn = document.getElementById('presetToggleBtn');
   var zenToggleBtn = document.getElementById('zenToggleBtn');
 
+  var landscapeColLeft = document.getElementById('landscapeColLeft');
+  var coverWrap = document.getElementById('coverWrap');
   var coverImg = document.getElementById('coverImg');
   var coverPlaceholder = document.getElementById('coverPlaceholder');
+  var coverSubtitleText = document.getElementById('coverSubtitleText');
+  var coverSubtitleTextInner = document.getElementById('coverSubtitleTextInner');
+  var subtitleToggleBtn = document.getElementById('subtitleToggleBtn');
   var titleText = document.getElementById('titleText');
   var authorText = document.getElementById('authorText');
   var chapterPillText = document.getElementById('chapterPillText');
@@ -622,6 +698,14 @@
   // harmless no-op there rather than needing to be hidden/disabled client-side.
   zenToggleBtn.addEventListener('click', function(){
     sendCommand({ action: 'toggleZen' });
+  });
+
+  // Relays the click straight through - the active device owns the actual
+  // four-mode cycle (off/animated/static/remote) and broadcasts the
+  // result back down via the next `state` message, same pattern as
+  // toggleZen above. No .active/highlighted state here either.
+  subtitleToggleBtn.addEventListener('click', function(){
+    sendCommand({ action: 'toggleSubtitle' });
   });
 
   allBooksBtn.addEventListener('click', function(){
@@ -772,6 +856,69 @@
     }
   }
 
+  // Flat size instead of a dynamic fit-to-box (that was swinging too
+  // small/too large cue to cue) - #coverSubtitleText wraps within its own
+  // 5%-each-side padding (see its CSS) rather than needing to fit, so a
+  // flat size never needs to overflow the box.
+  var lastCoverSubtitleText = null;
+  var COVER_SUBTITLE_FONT_SIZE = 20;
+  function fitCoverSubtitleText(){
+    coverSubtitleText.style.fontSize = COVER_SUBTITLE_FONT_SIZE + 'px';
+  }
+
+  // Word-by-word fade, same formula as player.html's own updateSubtitleWordFade()
+  // (COMPLETE_AT_FRACTION-based continuous opacity ramp across the cue's own
+  // start/end) - driven off activeState.position rather than a local clock,
+  // so it updates in the same ~1/sec steps the WS state channel already
+  // ticks at (immediately on a cue change, since reportState() forces those)
+  // rather than a smooth 60fps animation. Chunkier than the player's own
+  // frame-by-frame version, but still visibly fades in rather than the cue
+  // just popping in all at once.
+  var COVER_SUBTITLE_COMPLETE_AT_FRACTION = 0.95;
+  var coverSubtitleWordSpans = [];
+  function updateCoverSubtitleText(text, cueStart, cueEnd, position){
+    if (text !== lastCoverSubtitleText) {
+      lastCoverSubtitleText = text;
+      coverSubtitleTextInner.innerHTML = '';
+      coverSubtitleWordSpans = [];
+      var words = text.split(/\s+/).filter(Boolean);
+      words.forEach(function(w, i){
+        var span = document.createElement('span');
+        span.textContent = w;
+        coverSubtitleTextInner.appendChild(span);
+        coverSubtitleWordSpans.push(span);
+        if (i < words.length - 1) coverSubtitleTextInner.appendChild(document.createTextNode(' '));
+      });
+    }
+    if (coverSubtitleWordSpans.length && cueEnd > cueStart) {
+      var frac = Math.max(0, Math.min(1, (position - cueStart) / (cueEnd - cueStart)));
+      var adjustedFrac = Math.min(1, frac / COVER_SUBTITLE_COMPLETE_AT_FRACTION);
+      var n = coverSubtitleWordSpans.length;
+      var continuous = adjustedFrac * n;
+      for (var i = 0; i < n; i++) {
+        coverSubtitleWordSpans[i].style.opacity = Math.max(0, Math.min(1, continuous - i));
+      }
+    }
+    fitCoverSubtitleText();
+  }
+  // #coverWrap's own size changes across breakpoints (and on a plain
+  // window resize) - refit whenever it's actually the visible one.
+  window.addEventListener('resize', function(){
+    if (landscapeColLeft.classList.contains('subtitle-mode')) fitCoverSubtitleText();
+  });
+  // 'Special Elite' is a webfont (see the <link> in <head>) that may still
+  // be loading (or not even requested yet - browsers only start loading a
+  // @font-face once something actually needs to paint with it, and
+  // #coverSubtitleText starts display:none) the first time a cue shows -
+  // request it eagerly here so it's more likely already cached/rendering
+  // correctly by the time subtitle-mode first activates, rather than
+  // flashing the fallback monospace briefly.
+  try {
+    document.fonts.load('20px "Special Elite"').then(function(){
+      if (landscapeColLeft.classList.contains('subtitle-mode')) fitCoverSubtitleText();
+    });
+  } catch (e) {}
+
   function renderNowPlaying(){
     if (!activeState) return;
     renderBookIdentity(activeState.bookId);
@@ -779,13 +926,19 @@
     chapterPillText.textContent = 'Chapter: ' + (activeState.chapterIndex || 0) + '/' + (activeState.totalChapters || 0) +
       ' Part: ' + (activeState.partIndex || 0) + '/' + (activeState.totalParts || 0);
 
-    coverImg.src = '/api/books/' + activeState.bookId + '/chapters/' + activeState.chapterBase + '/cover';
-    coverImg.style.display = 'block';
-    coverPlaceholder.style.display = 'none';
-    coverImg.onerror = function(){
-      coverImg.style.display = 'none';
-      coverPlaceholder.style.display = 'flex';
-    };
+    var subtitleOnRemote = activeState.subtitleMode === 'remote';
+    landscapeColLeft.classList.toggle('subtitle-mode', subtitleOnRemote);
+    if (subtitleOnRemote) {
+      updateCoverSubtitleText(activeState.subtitleText || '', activeState.subtitleCueStart || 0, activeState.subtitleCueEnd || 0, activeState.position || 0);
+    } else {
+      coverImg.src = '/api/books/' + activeState.bookId + '/chapters/' + activeState.chapterBase + '/cover';
+      coverImg.style.display = 'block';
+      coverPlaceholder.style.display = 'none';
+      coverImg.onerror = function(){
+        coverImg.style.display = 'none';
+        coverPlaceholder.style.display = 'flex';
+      };
+    }
 
     // Skip while the user's actively dragging the seek bar - otherwise
     // the device's own incoming position updates would fight the drag,

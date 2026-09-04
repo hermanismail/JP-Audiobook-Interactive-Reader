@@ -70,6 +70,22 @@ router.get('/books/:bookId/chapters/:chapterBase/sync', (req, res) => {
   res.type('application/json').send(readFileSync(syncPath, 'utf8'));
 });
 
+// Optional per-chapter translation subtitle, plain SRT - a book/chapter
+// simply doesn't have one unless the file exists in the folder (nothing
+// in book.json/sync.json declares it), matching the same
+// resolve-or-404 pattern as sync.json above.
+router.get('/books/:bookId/chapters/:chapterBase/subtitle', (req, res) => {
+  const bookPath = requireBook(req, res);
+  if (!bookPath) return;
+  const base = requireChapter(req, res, bookPath);
+  if (!base) return;
+  const srtPath = path.join(bookPath, `${base}.srt`);
+  if (!existsSync(srtPath)) {
+    return res.status(404).json({ error: `No subtitle for "${base}"` });
+  }
+  res.type('text/plain').send(readFileSync(srtPath, 'utf8'));
+});
+
 router.get('/books/:bookId/chapters/:chapterBase/images', (req, res) => {
   const bookPath = requireBook(req, res);
   if (!bookPath) return;
