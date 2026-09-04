@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230b0b0d'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Roboto, Arial, sans-serif' font-weight='700' font-size='20' fill='%23e08a3c'%3ES%3C/text%3E%3C/svg%3E">
+<title>SHAMA Chapter</title>
+<!--
+  LAYER 3 of the app-shell rebuild (see CLAUDE.md's layer map). Per-book
+  screen (cover/continue/chapters/bookmarks) - the "original library page"
+  layout, ported near-verbatim from _legacy-index.html. Forks on ?mode=:
+
+  player: identical to the app's pre-remote behavior. Doesn't care about
+    other devices. Continue/chapter/bookmark navigate to player.html with
+    book/chapter/position in the URL - opening that page is what actually
+    claims active-device status (see server/src/sync.js's claimActive()),
+    not anything that happens here.
+
+  remote: same layout, plus a two-row Continue pill (chapter/position +
+    which device it'll play on) and, when a tv-player is idling, a
+    "Switch to [device]" pill beneath it. Continue/chapter/bookmark send a
+    `load` command over the shared WebSocket to whichever device is
+    current, then navigate to remote.html to show the result.
+
+  Connects as role:'controller' - opening this page never claims active-
+  device status on its own, only actually choosing something to play does
+  (via player.html for player mode, or the `load` command for remote mode).
+-->
+<style>
+  :root {
+    --bg:#0b0b0d; --ink:#e8e6ea; --panel-bg:#17161a; --panel-bg-2:#1c1a20;
+    --border:#3a3840; --muted:#9b93b0; --muted2:#9a97a0; --placeholder-ink:#4a4650;
+    --accent:#e08a3c; --book-pill-ink:#d6d6d6;
+  }
+  :root.light {
+    --bg:#e5decf; --ink:#000000; --panel-bg:#ddd3bd; --panel-bg-2:#efe8d8;
+    --border:#b8ab8e; --muted:#7a6f58; --muted2:#8a7f68; --placeholder-ink:#a89a7d;
+    --accent:#e08a3c; --book-pill-ink:#000000;
+  }
+  html, body {
+    margin:0; min-height:100%; background:var(--bg); color:var(--ink);
+    font-family:"Roboto","Arial",sans-serif;
+  }
+  body { box-sizing:border-box; padding:24px; display:flex; flex-direction:column; align-items:center; }
+
+  #topIcons { display:flex; gap:14px; margin-bottom:12px; }
+  .navPill {
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+    width:50px; height:50px; border-radius:50%; padding:0; cursor:pointer;
+    border:1px solid var(--border); color:var(--ink); text-decoration:none;
+  }
+
+  #modeIndicator {
+    display:flex; align-items:center; justify-content:center; gap:8px;
+    height:40px; padding:0 20px; box-sizing:border-box; border-radius:999px;
+    border:1px solid var(--border); color:var(--ink); font-size:14px; font-weight:600;
+    text-transform:uppercase; margin-bottom:24px;
+  }
+  #modeIndicator svg { flex-shrink:0; width:1em; height:1em; }
+
+  /* --- Book pill (shared base with library.html's grid) --- */
+  .bookPill {
+    width:400px; height:400px; box-sizing:border-box;
+    border:2px solid var(--muted2); border-radius:28px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:8px; padding:16px; cursor:pointer;
+  }
+  .bookCover, .bookCoverPlaceholder {
+    width:300px; height:300px; border-radius:12px; object-fit:cover;
+    background:var(--panel-bg-2); flex-shrink:0;
+  }
+  .bookCoverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:48px; }
+  .bookCover, .bookCoverPlaceholder {
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+  }
+  .bookTitle, .bookAuthor {
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    color:var(--book-pill-ink); text-align:center; width:100%; flex-shrink:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .bookTitle { font-size:18px; font-weight:700; line-height:1.3; }
+  .bookAuthor { font-size:16px; line-height:1.3; }
+
+  /* --- Two-column per-book layout, ported from _legacy-index.html --- */
+  #libraryBody { display:flex; flex-wrap:nowrap; justify-content:center; align-items:flex-start; gap:24px; width:100%; }
+  #libraryLeftColWrap { display:flex; flex-direction:column; align-items:center; gap:12px; flex-shrink:0; }
+  .libraryBookPill { flex-shrink:0; cursor:default; }
+  #libraryRightCol { width:400px; flex-shrink:0; display:flex; flex-direction:column; gap:20px; }
+
+  .pillWrap { display:flex; flex-direction:column; gap:8px; width:100%; }
+  .chapterPill {
+    height:35px; width:100%; max-width:400px; box-sizing:border-box; padding:0 16px;
+    border-radius:999px; border:1px solid var(--border); color:var(--ink); background:none;
+    font-family:inherit;
+    display:flex; align-items:center; justify-content:center; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; font-size:14px; cursor:pointer; flex-shrink:0;
+  }
+  .chapterPill.continuePill {
+    border-color:var(--accent); color:var(--accent);
+    height:auto; min-height:35px; flex-direction:column; gap:3px; padding:8px 16px;
+  }
+  .continueMainRow { font-size:14px; }
+  .continueDeviceRow { display:flex; align-items:center; gap:6px; font-size:12px; opacity:0.9; }
+  .continueDeviceRow svg { flex-shrink:0; }
+  .pillIconRow { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; }
+  .chapterPill.deviceSwitchPill { margin-bottom:0; }
+
+  .twoColRow { display:flex; gap:8px; width:400px; align-items:flex-start; }
+  .twoColRow .pillWrap { width:196px; flex-shrink:0; }
+
+  .sectionLabel { color:var(--muted2); font-size:12px; margin:0 0 8px; text-transform:uppercase; letter-spacing:0.04em; }
+  #emptyMsg { color:var(--muted2); font-size:14px; margin-bottom:16px; }
+
+  .bookmarkWrap { position:relative; overflow:hidden; border-radius:999px; height:35px; width:100%; max-width:400px; }
+  /* Unlike every other pill, this one needs an opaque background - the
+     swipe-to-delete mechanic relies on the row visually covering the
+     delete button sitting behind it at rest. Matches the page background
+     exactly (not a contrasting panel color) so it still reads as "no
+     fill" rather than a filled pill, while still hiding what's behind it. */
+  .bookmarkWrap .chapterPill { position:relative; z-index:1; width:100%; height:100%; background:var(--bg); }
+  .bookmarkDelete { position:absolute; top:0; right:0; bottom:0; width:72px; border:none; border-radius:0 999px 999px 0;
+    background:#7a3030; color:#fff; font-size:13px; font-family:inherit; cursor:pointer; }
+
+  @media (max-width:899px) {
+    #libraryBody { flex-direction:column; align-items:center; }
+    .libraryBookPill { width:min(400px, 90vw); height:auto; }
+    .libraryBookPill .bookCover, .libraryBookPill .bookCoverPlaceholder {
+      width:100%; height:auto; aspect-ratio:1 / 1;
+    }
+    #libraryRightCol { width:100%; max-width:400px; }
+    .twoColRow { flex-direction:column; width:100%; }
+    .twoColRow .pillWrap { width:100%; }
+  }
+</style>
+</head>
+<body>
+
+<div id="topIcons">
+  <a id="homeBtn" class="navPill" href="index.html" aria-label="Home">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+  </a>
+  <a id="libraryBtn" class="navPill" href="library.html" aria-label="Library">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+  </a>
+</div>
+<div id="modeIndicator">
+  <svg id="modeIndicatorIconPlayer" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+  <svg id="modeIndicatorIconRemote" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><rect x="7" y="2" width="10" height="20" rx="4"/><circle cx="12" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="16" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="none"/></svg>
+  <span id="modeIndicatorLabel">Player</span>
+</div>
+
+<div id="libraryBody"></div>
+
+<script>
+(function(){
+  var libraryBody = document.getElementById('libraryBody');
+  var homeBtn = document.getElementById('homeBtn');
+  var libraryBtn = document.getElementById('libraryBtn');
+  var modeIndicatorLabel = document.getElementById('modeIndicatorLabel');
+  var iconPlayer = document.getElementById('modeIndicatorIconPlayer');
+  var iconRemote = document.getElementById('modeIndicatorIconRemote');
+
+  var theme = 'dark';
+  try { theme = localStorage.getItem('theme') || 'dark'; } catch (e) {}
+  document.documentElement.classList.toggle('light', theme === 'light');
+
+  var params = new URLSearchParams(location.search);
+  var bookId = params.get('book');
+  var mode = params.get('mode') === 'remote' ? 'remote' : 'player';
+  modeIndicatorLabel.textContent = mode === 'remote' ? 'Remote' : 'Player';
+  iconPlayer.style.display = mode === 'remote' ? 'none' : '';
+  iconRemote.style.display = mode === 'remote' ? '' : 'none';
+  // Home never carries a flag (index.html holds none); Library always
+  // carries whichever mode this page is currently in.
+  libraryBtn.href = 'library.html?mode=' + mode;
+
+  var MONITOR_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>';
+
+  function humanize(base){
+    var m = base.match(/(\d+)$/);
+    return m ? ('Chapter ' + parseInt(m[1], 10)) : base;
+  }
+  function formatTime(s){
+    if (!isFinite(s) || s < 0) s = 0;
+    s = Math.round(s);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    var mm = (h > 0 && m < 10) ? ('0' + m) : String(m);
+    var ss = sec < 10 ? ('0' + sec) : String(sec);
+    return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
+  }
+
+  // --- WebSocket (remote mode only, but connected regardless so a
+  // subsequent mode switch doesn't need a reload) - role:'controller',
+  // never qualifies this device as a playback target. Tracks the active
+  // device and an idle tv-player if one exists, per the new device-
+  // priority model (server/src/sync.js).
+  var ws = null;
+  var activeDevice = null; // {deviceId, deviceName, deviceKind} | null
+  var idleTv = null;       // {deviceId, deviceName} | null
+  var targetDeviceId = null; // which device continue/chapter/bookmark clicks will target
+
+  function wsSend(payload){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  }
+
+  function connect(){
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.addEventListener('open', function(){
+      var deviceId;
+      try {
+        deviceId = sessionStorage.getItem('chapterControllerId');
+        if (!deviceId) { deviceId = crypto.randomUUID(); sessionStorage.setItem('chapterControllerId', deviceId); }
+      } catch (e) { deviceId = 'chap-' + Math.random().toString(36).slice(2); }
+      ws.send(JSON.stringify({ type: 'hello', role: 'controller', deviceId: deviceId, deviceName: 'Chapter', deviceKind: 'controller' }));
+    });
+    ws.addEventListener('message', function(ev){
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'devices') {
+        activeDevice = msg.active;
+        idleTv = msg.idleTv;
+        if (!targetDeviceId || (activeDevice && targetDeviceId !== activeDevice.deviceId && targetDeviceId !== (idleTv && idleTv.deviceId))) {
+          targetDeviceId = activeDevice ? activeDevice.deviceId : (idleTv ? idleTv.deviceId : null);
+        }
+        if (mode === 'remote') renderLibrary();
+      }
+    });
+    ws.addEventListener('close', function(){ setTimeout(connect, 2000); });
+    ws.addEventListener('error', function(){ try { ws.close(); } catch (e) {} });
+  }
+  if (mode === 'remote') connect();
+
+  function targetDeviceName(){
+    if (activeDevice && targetDeviceId === activeDevice.deviceId) return activeDevice.deviceName;
+    if (idleTv && targetDeviceId === idleTv.deviceId) return idleTv.deviceName;
+    return 'No device connected';
+  }
+
+  // Switching the target device (the "Switch to X" pill) hands over active
+  // status server-side immediately (see sync.js's switchActive), but only
+  // updates the Continue pill's device info here - no navigation, per spec.
+  function switchTargetDevice(deviceId){
+    targetDeviceId = deviceId;
+    wsSend({ type: 'command', action: 'switchActive', targetDeviceId: deviceId });
+    renderLibrary();
+  }
+
+  // player mode: opening player.html with book/chapter/position in the URL
+  // is itself what claims active-device status (see server/src/sync.js) -
+  // no WebSocket round-trip needed here.
+  // remote mode: sends `load` to whichever device is current, then hands
+  // off to remote.html to show the result.
+  function playChapter(chapterBase, resumeSeconds){
+    if (mode === 'player') {
+      location.href = 'player.html?book=' + encodeURIComponent(bookId) +
+        '&chapter=' + encodeURIComponent(chapterBase) + '&t=' + Math.floor(resumeSeconds || 0);
+      return;
+    }
+    if (!targetDeviceId) { alert('No player devices are connected right now.'); return; }
+    wsSend({
+      type: 'command', action: 'load', targetDeviceId: targetDeviceId,
+      bookId: bookId, chapterBase: chapterBase, positionSeconds: resumeSeconds || 0
+    });
+    location.href = 'remote.html';
+  }
+
+  var DELETE_WIDTH = 72;
+
+  // Guards against overlapping renders - every incoming `devices` message
+  // (in remote mode) calls renderLibrary() again, and without this a
+  // second call arriving while the first is still mid-`await` cleared-
+  // then-repopulated the same libraryBody, leaving both calls' elements
+  // interleaved in the DOM (confirmed via testing: opening a TV and
+  // loading a chapter fired `devices` twice in quick succession and
+  // visibly duplicated the entire chapter/bookmark list). Same pattern as
+  // player.html's/tv-player.html's loadToken.
+  var renderLibraryToken = 0;
+
+  async function renderLibrary(){
+    var myToken = ++renderLibraryToken;
+    if (!bookId) {
+      libraryBody.innerHTML = '<p id="emptyMsg">No book selected.</p>';
+      return;
+    }
+    libraryBody.innerHTML = '';
+
+    var booksRes = await fetch('/api/books').then(function(r){ return r.json(); }).catch(function(){ return { books: [] }; });
+    if (myToken !== renderLibraryToken) return;
+    var book = (booksRes.books || []).find(function(b){ return b.id === bookId; }) || {};
+    var chaptersRes = await fetch('/api/books/' + bookId + '/chapters').then(function(r){ return r.json(); }).catch(function(){ return { chapters: [] }; });
+    if (myToken !== renderLibraryToken) return;
+    var chapters = chaptersRes.chapters || [];
+
+    var leftCol = document.createElement('div');
+    leftCol.className = 'bookPill libraryBookPill';
+    var cover = document.createElement('img');
+    cover.className = 'bookCover';
+    cover.src = '/api/books/' + bookId + '/cover';
+    cover.onerror = function(){
+      cover.replaceWith(Object.assign(document.createElement('div'), { className: 'bookCoverPlaceholder', innerHTML: '&#9834;' }));
+    };
+    leftCol.appendChild(cover);
+    var leftTitle = document.createElement('div');
+    leftTitle.className = 'bookTitle';
+    leftTitle.textContent = book.title || bookId;
+    leftCol.appendChild(leftTitle);
+    var leftAuthor = document.createElement('div');
+    leftAuthor.className = 'bookAuthor';
+    leftAuthor.textContent = book.author || '';
+    leftCol.appendChild(leftAuthor);
+
+    var leftColWrap = document.createElement('div');
+    leftColWrap.id = 'libraryLeftColWrap';
+    leftColWrap.appendChild(leftCol);
+    libraryBody.appendChild(leftColWrap);
+
+    var extra = { lastPosition: null, chapterProgress: {}, bookmarks: [] };
+    try {
+      extra = await fetch('/api/books/' + bookId + '/bookmarks-and-last-position').then(function(r){ return r.json(); });
+    } catch (e) {}
+    if (myToken !== renderLibraryToken) return;
+
+    if (extra.lastPosition) {
+      var continuePill = document.createElement('button');
+      continuePill.className = 'chapterPill continuePill';
+      var mainRow = document.createElement('div');
+      mainRow.className = 'continueMainRow';
+      mainRow.textContent = 'Continue: ' + humanize(extra.lastPosition.chapterBase) + ' (' + formatTime(extra.lastPosition.positionSeconds) + ')';
+      continuePill.appendChild(mainRow);
+      if (mode === 'remote') {
+        var deviceRow = document.createElement('div');
+        deviceRow.className = 'continueDeviceRow';
+        deviceRow.innerHTML = MONITOR_ICON + '<span>' + targetDeviceName() + '</span>';
+        continuePill.appendChild(deviceRow);
+      }
+      continuePill.addEventListener('click', function(){
+        playChapter(extra.lastPosition.chapterBase, extra.lastPosition.positionSeconds);
+      });
+      leftColWrap.appendChild(continuePill);
+
+      // "Switch to [idle device]" - only when a tv-player is idling AND
+      // it isn't already the current target.
+      if (mode === 'remote' && idleTv && idleTv.deviceId !== targetDeviceId) {
+        var switchPill = document.createElement('button');
+        switchPill.className = 'chapterPill deviceSwitchPill';
+        switchPill.innerHTML = '<span class="pillIconRow">' + MONITOR_ICON + '<span>Switch to ' + idleTv.deviceName + '</span></span>';
+        switchPill.addEventListener('click', function(){ switchTargetDevice(idleTv.deviceId); });
+        leftColWrap.appendChild(switchPill);
+      }
+    }
+
+    var rightCol = document.createElement('div');
+    rightCol.id = 'libraryRightCol';
+    var chapterWrap = document.createElement('div');
+    chapterWrap.id = 'chapterPillsWrap';
+    rightCol.appendChild(chapterWrap);
+    libraryBody.appendChild(rightCol);
+
+    if (chapters.length === 0) {
+      var msg = document.createElement('p');
+      msg.id = 'emptyMsg';
+      msg.textContent = 'No chapters found for this book.';
+      chapterWrap.appendChild(msg);
+    } else {
+      var makeChapterPill = function(base){
+        var pill = document.createElement('button');
+        pill.className = 'chapterPill';
+        pill.textContent = humanize(base);
+        // Persistent chapter progress: every chapter remembers its own
+        // last-played position independently (server-side, keyed by
+        // book+chapter) - re-opening any chapter you've been on before
+        // resumes where you left off instead of restarting at 0.
+        var resumeSeconds = extra.chapterProgress[base] || 0;
+        pill.addEventListener('click', function(){ playChapter(base, resumeSeconds); });
+        return pill;
+      };
+
+      var singleCol = document.createElement('div');
+      singleCol.className = 'pillWrap';
+      chapters.forEach(function(base){ singleCol.appendChild(makeChapterPill(base)); });
+      chapterWrap.appendChild(singleCol);
+
+      if (singleCol.getBoundingClientRect().height > 400) {
+        chapterWrap.innerHTML = '';
+        var GAP = 8, PILL_H = 35;
+        var capacity = Math.max(1, Math.floor((400 + GAP) / (PILL_H + GAP)));
+        var leftChapters = chapters.slice(0, capacity);
+        var rightChapters = chapters.slice(capacity);
+
+        var twoColRow = document.createElement('div');
+        twoColRow.className = 'twoColRow';
+        var leftSubCol = document.createElement('div');
+        leftSubCol.className = 'pillWrap';
+        leftChapters.forEach(function(base){ leftSubCol.appendChild(makeChapterPill(base)); });
+        var rightSubCol = document.createElement('div');
+        rightSubCol.className = 'pillWrap';
+        rightChapters.forEach(function(base){ rightSubCol.appendChild(makeChapterPill(base)); });
+        twoColRow.appendChild(leftSubCol);
+        twoColRow.appendChild(rightSubCol);
+        chapterWrap.appendChild(twoColRow);
+      }
+    }
+
+    renderBookmarksSection(rightCol, extra.bookmarks || []);
+  }
+
+  function renderBookmarksSection(rightCol, bookmarks){
+    if (!bookmarks.length) return;
+    var label = document.createElement('div');
+    label.className = 'sectionLabel';
+    label.textContent = 'Bookmarks';
+    rightCol.appendChild(label);
+    var wrapEl = document.createElement('div');
+    wrapEl.className = 'pillWrap';
+    rightCol.appendChild(wrapEl);
+
+    var openRowWrap = null;
+    bookmarks.forEach(function(bm){
+      var wrap = document.createElement('div');
+      wrap.className = 'bookmarkWrap';
+
+      var deleteBtn = document.createElement('button');
+      deleteBtn.className = 'bookmarkDelete';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.addEventListener('click', async function(){
+        await fetch('/api/books/' + bookId + '/bookmarks/' + bm.id, { method: 'DELETE' });
+        renderLibrary();
+      });
+
+      var row = document.createElement('button');
+      row.className = 'chapterPill bookmarkRow';
+      row.textContent = bm.label + ' — ' + humanize(bm.chapterBase);
+      row.style.touchAction = 'pan-y';
+
+      var isOpen = false, dragStartX = null, baseX = 0;
+      function setOffset(px){ row.style.transform = 'translateX(' + px + 'px)'; }
+      wrap._closeBookmarkRow = function(){ isOpen = false; row.style.transition = 'transform 0.2s'; setOffset(0); };
+
+      row.addEventListener('pointerdown', function(e){
+        dragStartX = e.clientX;
+        baseX = isOpen ? -DELETE_WIDTH : 0;
+        row.style.transition = 'none';
+        try { row.setPointerCapture(e.pointerId); } catch (err) {}
+      });
+      row.addEventListener('pointermove', function(e){
+        if (dragStartX === null) return;
+        var offset = baseX + (e.clientX - dragStartX);
+        setOffset(Math.max(-DELETE_WIDTH, Math.min(0, offset)));
+      });
+      row.addEventListener('pointerup', function(e){
+        if (dragStartX === null) return;
+        var dx = e.clientX - dragStartX;
+        dragStartX = null;
+        row.style.transition = 'transform 0.2s';
+        if (Math.abs(dx) < 8) {
+          if (isOpen) wrap._closeBookmarkRow();
+          else playChapter(bm.chapterBase, bm.positionSeconds);
+          return;
+        }
+        var finalOffset = baseX + dx;
+        if (finalOffset <= -DELETE_WIDTH / 2) {
+          if (openRowWrap && openRowWrap !== wrap) openRowWrap._closeBookmarkRow();
+          openRowWrap = wrap;
+          isOpen = true;
+          setOffset(-DELETE_WIDTH);
+        } else {
+          isOpen = false;
+          setOffset(0);
+        }
+      });
+      row.addEventListener('pointercancel', function(){ dragStartX = null; });
+
+      wrap.appendChild(deleteBtn);
+      wrap.appendChild(row);
+      wrapEl.appendChild(wrap);
+    });
+  }
+
+  renderLibrary();
+})();
+</script>
+</body>
+</html>

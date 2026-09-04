@@ -1,0 +1,2580 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<!-- Lets "Add to Home Screen" launch this as a standalone, chrome-free
+     web app on iOS/iPadOS regardless of Safari version - a more reliable
+     fullscreen path than depending on requestFullscreen() succeeding
+     (only supported for non-video elements since iOS/iPadOS 26). -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<!-- Roboto for the home screen's title/subtitle - Google Fonts, since
+     there's no reliable guarantee a system actually has a font literally
+     named "Roboto Black" installed. 300 for #homeSubtitle (same family
+     as the title, just its existing Light weight), 700 for #homeTitle
+     (bold, but a step down from the Black/900 cut - see the weight note
+     on #homeTitle below). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+<title>JP Audiobook Player</title>
+<style>
+  /* Theme: dark (default) / light, toggled via a .light class on <html>
+     by #themeToggleBtn below. Only two colors are actually specified by
+     the request (background #e5decf, black ink) - everything else here
+     (panel backgrounds, borders, muted text) is a proportionate design
+     fill-in derived from the dark theme's existing relationships, open
+     to adjustment. --accent stays identical in both themes (already
+     reads fine against both a near-black and a light-beige background).
+     --read-text-base is deliberately close in both themes (pre-highlighted
+     text stays a light grey either way) - tuned to #d0d0d0 in light mode
+     after #d6d6d6 read too low-contrast against #e5decf during review. */
+  :root {
+    --bg:#0b0b0d; --ink:#e8e6ea; --panel-bg:#17161a; --panel-bg-2:#1c1a20;
+    --border:#3a3840; --muted:#9b93b0; --muted2:#9a97a0; --placeholder-ink:#4a4650;
+    --accent:#e08a3c; --progress-track:#2a2830; --control-btn-bg:#26232b;
+    --timerow-ink:#c9c6cf;
+    --read-text-base:#d6d6d6; --read-text-highlight-a:#F6CAC0; --read-text-b:#d6d6d6;
+    --book-pill-ink:#d6d6d6;
+    --zen-overlay-bg:rgba(23,22,26,0.82);
+    --preset-active-border:#d6d6d6;
+  }
+  :root.light {
+    --bg:#e5decf; --ink:#000000; --panel-bg:#ddd3bd; --panel-bg-2:#efe8d8;
+    --border:#b8ab8e; --muted:#7a6f58; --muted2:#8a7f68; --placeholder-ink:#a89a7d;
+    --accent:#e08a3c; --progress-track:#cfc3a8; --control-btn-bg:#e5dcc4;
+    --timerow-ink:#4a4030;
+    --read-text-base:#d0d0d0; --read-text-highlight-a:#000000; --read-text-b:#000000;
+    --book-pill-ink:#000000;
+    --zen-overlay-bg:rgba(221,211,189,0.88);
+    --preset-active-border:#000000;
+  }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); font-family: sans-serif; overflow:hidden; }
+
+  /* Home screen: pill grid of every configured book - the app's actual
+     entry point now. Clicking a pill goes to the usual per-book library
+     view (#libraryScreen) below; nothing here talks to Android.* beyond
+     listBooks()/selectBook(), which only exist in this web build's own
+     bridge-shim.js (no Android equivalent - the native app only ever has
+     one SAF folder open at a time). */
+  #homeScreen { padding:24px; box-sizing:border-box; height:100%; overflow-y:auto; }
+  #homeHeader {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:24px 16px 0; text-align:center;
+  }
+  #homeTitle, #homeSubtitle {
+    color:var(--ink); margin:0;
+    font-family:"Roboto","Arial",sans-serif;
+  }
+  /* First letter of each word bolded - S/H/A/M/A spells out the title
+     above ("SHAMA"), same trick a lot of acronym-derived names use. */
+  .subtitleInitial { font-weight:700; color:var(--accent); }
+  /* Title/subtitle/mode-row all share one width rule: a fixed 800px above
+     1080px viewport width, flexing to 80% of the viewport (10% padding
+     each side) below it. font-size is never hardcoded for the title/
+     subtitle - fitHomeHeader() in the script measures each one's natural
+     width at a baseline size and scales it proportionally to snugly fill
+     this box, so "800px" describes the rendered text's width, not a font
+     size. The pre-JS font-size below is only a same-ballpark fallback for
+     the instant before that script runs. */
+  #homeTitle, #homeSubtitle, #modeRow {
+    width:800px; max-width:800px; box-sizing:border-box;
+  }
+  @media (max-width:1080px) {
+    #homeTitle, #homeSubtitle, #modeRow { width:80vw; max-width:80vw; }
+  }
+  #homeTitle {
+    font-weight:700;
+    letter-spacing:0.2em;
+    white-space:nowrap;
+    font-size:8rem;
+    margin:0;
+    /* letter-spacing adds its gap AFTER every character, including the
+       last one - so the rendered box is wider on the right than the left
+       (no matching gap before the first character), and text-align/
+       flex-centering centers that lopsided BOX, not the glyphs
+       themselves, visibly skewing the word left of true center at this
+       size (0.2em is ~large in absolute px once font-size is 100px+).
+       Negative margin-right equal to the letter-spacing value cancels
+       just that trailing gap so the centered box's true center lines up
+       with the glyphs' visual center instead. */
+    margin-right:-0.2em;
+  }
+  #homeSubtitle { font-weight:300; white-space:nowrap; font-size:28px; text-transform:uppercase; }
+  /* Below 1080px the subtitle would have to shrink to an illegible size to
+     keep pace with the title's own 80vw-flexed width, so it's hidden
+     entirely instead, per spec ("too long"). fitHomeHeader() skips fitting
+     it in this range too, rather than fighting a hidden element's width. */
+  @media (max-width:1080px) {
+    #homeSubtitle { display:none; }
+  }
+
+  /* Mode choice, shared visually with remote.html's own #modeRow - two
+     pills splitting the row evenly, current/active mode on the left. The
+     buffer above this row (between it and the subtitle) is set inline by
+     fitHomeHeader() to match the subtitle's own rendered height. */
+  #modeRow { display:flex; gap:14px; margin:0 auto; }
+  .modePill {
+    flex:1; display:flex; align-items:center; justify-content:center; gap:8px;
+    height:46px; box-sizing:border-box; border-radius:999px; border:1px solid var(--border);
+    color:var(--ink); text-decoration:none; font-size:16.8px; font-weight:600;
+    font-family:"Roboto","Arial",sans-serif; text-transform:uppercase;
+  }
+  .modePill.current { border-color:var(--accent); color:var(--accent); }
+  /* 1em, not a hardcoded px size (overriding the SVGs' own width/height
+     attributes) - scales automatically with .modePill's own font-size
+     instead of needing to be kept in sync with it by hand. */
+  .modePill svg { flex-shrink:0; width:1em; height:1em; }
+
+  #homeGrid {
+    display:flex; flex-wrap:wrap; justify-content:center; align-items:flex-start;
+    align-content:flex-start; gap:50px; padding:36px 16px; box-sizing:border-box;
+  }
+
+  /* Shown instead of the reader whenever some other device (the TV, or
+     another Player-mode tab) becomes the active player - this device's own
+     WebSocket connection received `deactivate` (see server/src/sync.js).
+     Deliberately simpler than #homeScreen's full hero treatment (fixed
+     size, not the fluid clamp()) since this is a transient "nothing to do
+     here right now" state, not the app's primary identity moment. */
+  #deactivatedScreen {
+    display:none; height:100%; flex-direction:column; align-items:center; justify-content:center;
+    gap:10px; text-align:center; font-family:"Roboto","Arial",sans-serif;
+  }
+  #deactivatedTitle { font-weight:700; font-size:3rem; letter-spacing:0.15em; color:var(--ink); }
+  #deactivatedSubtitle { font-size:1.1rem; color:var(--ink); }
+  #deactivatedHint { font-size:0.85rem; color:var(--muted); }
+  .bookPill {
+    width:400px; height:400px; box-sizing:border-box;
+    border:2px solid var(--muted2); border-radius:28px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:8px; padding:16px; cursor:pointer;
+  }
+  .bookPill.current { border-color:var(--accent); }
+  .bookCover, .bookCoverPlaceholder {
+    width:300px; height:300px; border-radius:12px; object-fit:cover;
+    background:var(--panel-bg-2); flex-shrink:0;
+  }
+  .bookCoverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:48px; }
+  .bookTitle, .bookAuthor {
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    color:var(--book-pill-ink); text-align:center; width:100%; flex-shrink:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .bookTitle { font-size:18px; font-weight:700; line-height:1.3; }
+  .bookAuthor { font-size:16px; line-height:1.3; }
+
+  /* flex column + align-items:center centers both direct children (the
+     home button and #libraryBody) as a group, so the button sits above
+     the two-column content instead of pinned to the far left on a wide
+     screen. */
+  #libraryScreen { display:none; flex-direction:column; align-items:center; padding:24px; box-sizing:border-box; height:100%; overflow-y:auto; }
+  #libraryScreen h1 { display:none; } /* left column's own title/author pill covers this now */
+  #chooseFolderBtn { display:block; width:100%; max-width:400px; box-sizing:border-box; text-align:left; padding:14px 16px; margin-bottom:10px; border-radius:10px; border:1px solid var(--border); background:var(--panel-bg); color:var(--ink); font-size:15px; }
+
+  /* Home icon pill - replaces the old "← All books" text link, now a
+     circular icon button matching the reader screen's .iconBtn visual
+     language (border/bg/currentColor icon), centered above the content
+     rather than pinned to the top-left corner. */
+  #allBooksBtn {
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+    width:50px; height:50px; border-radius:50%; padding:0; margin:0 0 24px; cursor:pointer;
+    border:1px solid var(--border); background:var(--panel-bg); color:var(--ink);
+  }
+
+  /* Two-column library layout: left = book cover/title/author (reuses
+     .bookPill from the home screen, exact 400x400 at >=900px container
+     width); right = chapter pills + bookmarks. Both columns centered as
+     a pair - see the 900px media query below for the narrow-screen
+     single-column fallback. Real iPad 8th gen report: at this size's
+     actual ~1080px landscape viewport, the two fixed 400px columns plus
+     the original 50px gap (850px total, before #libraryScreen's own 24px
+     x2 padding = 898px needed) left the whole row overflowing off the
+     left edge on real Safari, invisibly clipped since html/body have
+     overflow:hidden. Tightened the gap to 24px (824+48=872px needed),
+     *and* moved the breakpoint itself from 800 to 900px - 800 was never
+     actually wide enough for this layout's real minimum even before this
+     fix (872px including the old 50px gap's math would've been 898px),
+     so anything in the 800-872px range was silently overflowing by
+     design, not just on this one reported device. 900px leaves 28px of
+     real margin at its own threshold, clearing every popular breakpoint
+     immediately below it (768/810/820/834) into the safe single-column
+     layout instead of a cramped two-column one. */
+  #libraryBody { display:flex; flex-wrap:nowrap; justify-content:center; align-items:flex-start; gap:24px; }
+  /* Album art pill + Continue (if any), stacked as one unit so Continue
+     always sits directly under the art regardless of breakpoint - see
+     the 900px media query below, which only changes whether this whole
+     wrapper sits beside or above the right column, never Continue's
+     position relative to the art pill itself. */
+  #libraryLeftColWrap { display:flex; flex-direction:column; align-items:center; gap:12px; flex-shrink:0; }
+  .libraryBookPill { flex-shrink:0; cursor:default; }
+  #libraryRightCol { width:400px; flex-shrink:0; display:flex; flex-direction:column; gap:20px; }
+
+  /* Chapter/bookmark pills: fixed 35px height, full (flexible/fluid, not
+     a hardcoded literal px) width of their column by default - one pill
+     per row, Continue then Chapter 1, 2, 3... in reading order. See
+     renderLibrary() in the script: if that single column's *measured*
+     height exceeds 400px (matching the left column's own height), it's
+     rebuilt as two explicit side-by-side .pillWrap sub-columns
+     (.twoColRow) - left gets as many chapters, in order, as fit in
+     400px; Continue plus whatever's left goes in the right sub-column,
+     which is allowed to grow past 400px if even that overflows -
+     deliberately NOT left to flex-wrap's own row-major wrapping, which
+     would interleave Continue/Chapter 1 on row one, Chapter 2/3 on row
+     two, etc. instead of filling the left column with 1, 2, 3... first. */
+  .pillWrap { display:flex; flex-direction:column; gap:8px; width:100%; }
+  .chapterPill {
+    height:35px; width:100%; max-width:400px; box-sizing:border-box; padding:0 16px;
+    border-radius:999px; border:1px solid var(--border); background:var(--panel-bg); color:var(--ink);
+    display:flex; align-items:center; justify-content:center; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; font-size:14px; cursor:pointer; flex-shrink:0;
+  }
+  .chapterPill.continuePill { border-color:var(--accent); color:var(--accent); }
+  /* 2 x 196px + 8px gap = 400px - matches #libraryRightCol's own width
+     exactly (was 2x200+8=408px, 8px wider than its 400px parent - a
+     small pre-existing overflow of its own, folded into the same pass
+     that fixed the real iPad #libraryBody overflow above). */
+  .twoColRow { display:flex; gap:8px; width:400px; align-items:flex-start; }
+  .twoColRow .pillWrap { width:196px; flex-shrink:0; }
+
+  .sectionLabel { color:var(--muted2); font-size:12px; margin:0 0 8px; text-transform:uppercase; letter-spacing:0.04em; }
+  #emptyMsg { color:var(--muted2); font-size:14px; margin-bottom:16px; }
+
+  /* Bookmark pills reuse .chapterPill's sizing but need room for the
+     swipe-reveal delete button behind them, so each gets its own
+     positioned wrapper instead of sitting directly in the flex-wrap
+     (same swipe mechanic as before, just resized to the 35px pill). */
+  .bookmarkWrap { position:relative; overflow:hidden; border-radius:999px; height:35px; width:100%; max-width:400px; }
+  .bookmarkWrap .chapterPill { position:relative; z-index:1; width:100%; height:100%; }
+  .bookmarkDelete { position:absolute; top:0; right:0; bottom:0; width:72px; border:none; border-radius:0 999px 999px 0;
+    background:#7a3030; color:#fff; font-size:13px; }
+
+  @media (max-width:899px) {
+    #libraryBody { flex-direction:column; align-items:center; }
+    /* height:auto, not another min(400px, 90vw) forcing a square: the
+       cover art inside is a fixed 300x300 (.bookCover/.bookCoverPlaceholder
+       above), sized for the ≥900px case where the pill itself is a fixed
+       400x400 - forcing this pill to *also* be a shrunk square (e.g.
+       370.8px on a real 412px-wide phone) left no room for the still-300px
+       cover plus its two text lines plus padding, so the title/author
+       visibly overflowed past the pill's own rounded border (found via a
+       real device screenshot, not just at some inspected breakpoint).
+       Scaling the cover itself down via aspect-ratio below, then letting
+       this pill's height just follow its content, fixes it for any width
+       rather than tuning another magic threshold. */
+    .libraryBookPill { width:min(400px, 90vw); height:auto; }
+    .libraryBookPill .bookCover, .libraryBookPill .bookCoverPlaceholder {
+      width:100%; height:auto; aspect-ratio:1 / 1;
+    }
+    #libraryRightCol { width:100%; max-width:400px; }
+    /* Not enough width for two 196px sub-columns side by side on a
+       narrow screen - stack them instead (left sub-column's chapters,
+       then the right sub-column's Continue+remainder, both full width). */
+    .twoColRow { flex-direction:column; width:100%; }
+    .twoColRow .pillWrap { width:100%; }
+  }
+
+  #readerScreen { display:none; position:relative; height:100%; box-sizing:border-box; flex-direction:column; padding:16px; gap:10px; touch-action:none; }
+
+  #readerTopBar { position:absolute; top:16px; left:16px; z-index:5; display:flex; gap:8px; }
+  /* box-sizing explicit (not just relying on <button>'s default UA
+     border-box) since #volumeLevelPill reuses this class on a plain
+     <div> - content-box's default would let that one element's border
+     add ~2px on top of the declared 36px, throwing off alignment against
+     its <button> siblings in the volume stack. */
+  .iconBtn { box-sizing:border-box; width:36px; height:36px; border-radius:50%; border:1px solid var(--border); background:var(--panel-bg); color:var(--ink); display:flex; align-items:center; justify-content:center; padding:0; }
+  .iconBtn:disabled { opacity:0.35; cursor:default; }
+
+  /* Player controls row (prev chapter / prev part / play-pause / next
+     part / next chapter) - same .iconBtn circles as the top bar, living
+     inside #metaRow itself (see the grid rule below) as the middle column
+     between the cover/title/author info on the left and the chapter/speed
+     pills on the right, rather than a separate row of its own. Grid gives
+     this column `justify-self:stretch` by default, so #playerControls'
+     own box always spans the *entire* leftover gap between those two
+     blocks - centering the button group inside that box (justify-content
+     below) is therefore always a true center between the two info blocks,
+     not just the middle of the whole row, and vertically it's centered
+     against them via #metaRow's own `align-items:center`. */
+  #playerControls { display:flex; justify-content:center; align-items:center; gap:20px; min-width:0; }
+
+  /* Responsive collapse: chapter-skip buttons go first (bigger jumps,
+     less essential at a glance), then part-skip, leaving just
+     play/pause at the narrowest widths. Which class(es) are applied is
+     computed by updatePlayerControlsFit() from the row's actual measured
+     width vs. the container's available width - not a hardcoded viewport
+     breakpoint, since padding/container width is what actually determines
+     whether the row fits, not the raw window width. */
+  #playerControls.hide-chapter #prevChapterBtn,
+  #playerControls.hide-chapter #nextChapterBtn { display:none; }
+  #playerControls.hide-part #prevPartBtn,
+  #playerControls.hide-part #nextPartBtn { display:none; }
+  /* Even with hide-chapter+hide-part applied, a lone play/pause button
+     still visibly crowded the chapter/speed pill column on a real
+     412px-wide phone with a long "Chapter: X/Y Part: A/B" pill string -
+     the middle grid column's minmax(36px, 1fr) floor guarantees just
+     enough room for the button itself, with no breathing space left
+     over. Below 450px (a real device measurement, not derived from any
+     particular content), drop play/pause too rather than let it render
+     right up against its neighbor. */
+  #playerControls.hide-playpause #playPauseBtn { display:none; }
+  /* Same protected top zone as #readerTopBar (#frame's 64px top padding
+     below runs the full width of the frame, not just under the left
+     icons) - just anchored to the right edge instead. Slot order,
+     nearest the edge first: volume (16), preset (60), theme (104),
+     fullscreen/force-zen (148) - each 44px apart (36px icon + 8px gap). */
+  #volumeToggleBtn { position:absolute; top:16px; right:16px; z-index:5; }
+  #presetToggleBtn { position:absolute; top:16px; right:60px; z-index:5; font-size:16px; font-weight:500; }
+  /* Fade preset (B) only changes the pill's outline, not the あ glyph
+     itself - light grey in dark mode, black ink in light mode (both via
+     --preset-active-border, so the icon's own currentColor stays --ink
+     unlike #forceZenBtn.active, which intentionally uses --accent). */
+  #presetToggleBtn.active { border-color:var(--preset-active-border); }
+  /* icon color/border inverts for free via .iconBtn's color:var(--ink)
+     and the SVG's stroke="currentColor", same mechanism as every other
+     icon button here; no separate light/dark icon asset needed. */
+  #themeToggleBtn { position:absolute; top:16px; right:104px; z-index:5; }
+  /* #fullscreenToggleBtn (desktop: real requestFullscreen(), since F11
+     itself is invisible to JS - see applyDesktopFullscreenChrome() in
+     the script) and #forceZenBtn (touch: manually engage zen for
+     rotation-locked users) share this one position, since exactly one
+     of them is ever relevant per device - gated by (pointer: coarse/
+     fine) below, not JS, since pointer type doesn't change at runtime. */
+  #fullscreenToggleBtn, #forceZenBtn { position:absolute; top:16px; right:148px; z-index:5; }
+  #forceZenBtn.active { border-color:var(--accent); color:var(--accent); }
+  @media (pointer: coarse) { #fullscreenToggleBtn { display:none; } }
+  @media (pointer: fine) { #forceZenBtn { display:none; } }
+
+  /* Volume control: a small stack of four pills (+ / level / - / mute)
+     drops down below the volume icon, all the same 36px .iconBtn size
+     and right-aligned flush with it (so they line up in one column) -
+     10px gap from the icon and between each pill. All four keep the
+     plain default .iconBtn look (border:var(--border)/
+     background:var(--panel-bg)/color:var(--ink)) - no special accent/
+     active color scheme, just whatever the current dark/light theme
+     already gives every other icon button for free. */
+  #volumePopup {
+    display:none; flex-direction:column; gap:10px;
+    position:absolute; top:62px; right:16px; z-index:5;
+  }
+  #volumePopup.show { display:flex; }
+  #volumeLevelPill { font-size:13px; font-weight:600; cursor:default; }
+
+  /* Extra top padding (vs 26px on the other three sides) clears
+     #readerTopBar/#presetToggleBtn's icon buttons (top:16px + 36px tall =
+     52px from the screen edge, plus a little breathing room) - otherwise
+     the top-most column of vertical text would render right underneath
+     them. Keep in sync with PAD_TOP/PAD_X in the script below, which need
+     the same numbers for the text-fit math. Drops to 2vh/26px in zen mode
+     (see the .zen rule further down), since there are no icons left to
+     clear once they're hidden. */
+  #frame { flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:64px 26px 26px; box-sizing:border-box; }
+  #pageText { writing-mode:vertical-rl; height:100%; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:var(--read-text-base); font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; overflow-wrap:anywhere; }
+  #pageText span { transition:color 0.2s ease, opacity 0.15s linear; }
+  #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; white-space:normal; overflow-wrap:anywhere; }
+  #loadingOverlay { display:none; color:var(--muted); font-size:14px; text-align:center; }
+
+  /* Chrome (icon row + progress/info rows) visibility is decoupled from
+     .zen (the side-image content layout) - see applyZenState()/
+     fullscreenchange handling in the script. Mobile/tablet sets both
+     together on rotation (then toggles this one on pause/play); desktop
+     sets this independently of .zen, driven by real browser fullscreen
+     (F11), not width. */
+  #readerScreen.chrome-hidden #readerTopBar,
+  #readerScreen.chrome-hidden #presetToggleBtn,
+  #readerScreen.chrome-hidden #themeToggleBtn,
+  #readerScreen.chrome-hidden #fullscreenToggleBtn,
+  #readerScreen.chrome-hidden #forceZenBtn,
+  #readerScreen.chrome-hidden #volumeToggleBtn,
+  #readerScreen.chrome-hidden #volumePopup { display:none; }
+  /* !important, not another specificity bump: #zenChromeOverlay's own
+     "when to overlay" rule (further down) has grown multiple selectors
+     of varying, sometimes-equal specificity (.zen:not(.desktop) and
+     .zen.desktop.fullscreen both reduce to 2 classes, tying a plain
+     2-class hide selector and making the later-in-file rule win instead
+     of whichever is actually true) - chasing that with an ever-more­
+     specific hide selector for every new show condition doesn't scale.
+     chrome-hidden should unconditionally hide this regardless of *why*
+     the overlay would otherwise show, so it gets the one-shot fix
+     instead of another selector-specificity arms race. */
+  #readerScreen.chrome-hidden #zenChromeOverlay { display:none !important; }
+
+  /* Zen mode: distraction-free side-image layout. Two independent
+     triggers set the shared .zen class - mobile/tablet via physical
+     rotation (zenMql/zenCoarsePointerMql below), desktop via window
+     width alone (>=800px, see applyZenState()) - the .desktop modifier
+     distinguishes which sub-case is active for the CSS below, since
+     they want different padding/anchoring. */
+  /* 5% of screen height top/bottom, 5% of screen width left/right -
+     explicit request (originally 10%, halved after a follow-up request
+     to reduce every zen padding scheme from 10% to 5%), applied
+     unconditionally for mobile/tablet (no separate "windowed vs
+     fullscreen" state exists here the way desktop has both: rotating
+     into zen *is* the fullscreen-equivalent experience on a phone/iPad,
+     immersive mode and all, so there's nothing to distinguish it from).
+     Also fixes a real gap this shipped with: a coarse pointer (iPad's
+     touchscreen included) always routes through this mobile path
+     regardless of actual screen width, so an iPad in landscape zen was
+     still getting the old tiny mobile numbers even in real fullscreen,
+     while only .zen.desktop.fullscreen (below) had been bumped up.
+     Previously asymmetric (right 2vw > left 1vw, for the image's own
+     buffer) - now flat 5vw/5vh per the request, kept in sync with
+     ZEN_TOP_BOTTOM_FRACTION/ZEN_LEFT_FRACTION/ZEN_RIGHT_FRACTION in the
+     script below. Mobile/tablet only - see .zen.desktop below for the
+     desktop-specific override (windowed vs. fullscreen genuinely differ
+     there, so it keeps its own scheme). */
+  #readerScreen.zen #frame { padding:5vh 5vw; gap:2vw; }
+
+  /* Right-anchored, not centered: switches #frame's justify-content from
+     the normal mode's center to flex-end, so the [text, image] pair packs
+     against the right edge and any leftover width collects on the left -
+     the natural side for right-to-left vertical Japanese text, rather
+     than splitting evenly on both sides regardless of the image's aspect
+     ratio. #zenImageWrap is #pageText's sibling, appearing after it in
+     DOM order, so it's the one flex-end actually pins to the right - see
+     the JS comment on getAvailableSpace() for why the image (not the
+     text) is the fixed point chunk-to-chunk. Mobile/tablet only. */
+  #readerScreen.zen #frame { justify-content:flex-end; }
+
+  /* Desktop zen (window width >= 800px, non-touch): right-anchored,
+     same as mobile/tablet - a centered pair was tried first, but
+     #pageText's *actual* rendered width varies chunk-to-chunk (fitting
+     text is quantized into discrete vertical columns, so it rarely
+     fills its full column budget exactly - see recalcZenColumns() -
+     and drops to ~0 during a silent gap between chunks, when
+     blankPage() empties it out). Since centering packs and centers the
+     [text, image] row as a unit, that varying width made the whole row
+     - image included - visibly shift left/right, which was the actual
+     complaint (not just per-image-swap resizing, already fixed
+     separately by the fixed column widths). flex-end pins the image's
+     right edge to a constant position regardless of the text's actual
+     width, exactly like mobile/tablet already does - only the leftover
+     space (which nothing occupies) changes size. Keeps its own
+     symmetric padding scheme, though - just the anchoring changed. */
+  #readerScreen.zen.desktop #frame { padding:3vh 3vw; gap:2vw; justify-content:flex-end; }
+  /* Real fullscreen specifically (not just wide-window desktop zen) gets
+     more generous padding - 5% of the screen's own height top/bottom,
+     5% of its width left/right (originally 10%, halved after a
+     follow-up request to reduce every zen padding scheme from 10% to
+     5%) - kept in sync with ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION in
+     the script below (recalcZenColumns() needs the same numbers to size
+     the image/text columns against the right leftover space). Higher
+     specificity (3 classes vs. 2) than the plain .zen.desktop rule
+     above wins regardless of source order once .fullscreen is also
+     present. */
+  #readerScreen.zen.desktop.fullscreen #frame { padding:5vh 5vw; }
+
+  /* Chrome-as-overlay in zen mode: #zenChromeOverlay wraps #timeRow/
+     #progressTrack/#metaRow. Outside zen it's `display:contents` - inert,
+     the three rows stay direct flex children of #readerScreen exactly as
+     before (same gap, same flow). In zen, it becomes a positioned flex
+     column floating over #frame instead of a sibling that reserves its
+     own flow height - so #frame (flex:1) always fills the *entire*
+     available box regardless of whether chrome is shown or hidden, and
+     revealing/hiding it (pause/play on mobile, hover on desktop
+     fullscreen) never resizes or reflows the zen image/text columns
+     underneath. Real user report before this fix: chrome reappearing
+     visibly "pushed" the zen layout upward as #frame shrank to make room
+     for it in the normal flex flow. The translucent background (blurred,
+     theme-aware via --zen-overlay-bg) keeps it legible over whatever
+     image/text happens to be under it, since it's no longer sitting on
+     the plain screen background.
+     Scoped to only the cases where chrome actually toggles, though:
+     mobile/tablet zen (`.zen:not(.desktop)`, always toggles via
+     pause/play) and desktop zen while genuinely fullscreen
+     (`.zen.desktop.fullscreen`, `.fullscreen` set by
+     applyDesktopFullscreenChrome() from document.fullscreenElement).
+     Desktop zen in a normal (non-fullscreen) window never toggles chrome
+     at all - it's always visible there - so overlaying it would only
+     make it float oddly over the bottom of the image/text for no
+     reason; real user report confirmed this looked wrong. Left out of
+     the selector below, `#zenChromeOverlay` falls through to the plain
+     `display:contents` rule for that combination, i.e. back to sitting
+     in normal flow under #frame exactly like it did before this feature
+     existed. */
+  #zenChromeOverlay { display:contents; }
+  #readerScreen.zen:not(.desktop) #zenChromeOverlay,
+  #readerScreen.zen.desktop.fullscreen #zenChromeOverlay {
+    display:flex; flex-direction:column; gap:10px;
+    position:absolute; left:16px; right:16px; bottom:16px; z-index:6;
+    background:var(--zen-overlay-bg); border-radius:16px; padding:12px 16px;
+    box-sizing:border-box; backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+  }
+
+  /* Width is set explicitly from JS (recalcZenColumns()) to a cached,
+     evenly-split value - flex-shrink:0 keeps flexbox from ever
+     overriding it, so this box's size only ever changes on a genuine
+     resize/fullscreen-toggle recalculation, never per-chunk or when a
+     different side image (different aspect ratio) rotates in. */
+  #zenImageWrap { display:none; align-items:center; flex-shrink:0; }
+  #zenImage {
+    /* object-fit:contain (not width:auto) - the image scales to fit
+       inside this now-fixed-width box, whatever its own aspect ratio,
+       rather than the image's aspect ratio dictating the box's width -
+       this is what stops the image (and consequently the text column
+       next to it) from visibly resizing/repositioning every time a
+       differently-shaped image rotates in. */
+    height:100%; width:100%; object-fit:contain; border-radius:8px;
+  }
+  /* Rectangular feather, shared with every book-pill cover (home grid +
+     library screen's art pill) - #zenImage is the canonical definition;
+     .bookCover/.bookCoverPlaceholder just ride the same selector so the
+     two settings can never drift apart. Two independent linear
+     gradients (one per axis) composited (`intersect`/`source-in`) give a
+     rectangular fade with sharp corners, not an oval vignette - see the
+     zen mode section of CLAUDE.md for the fuller design note. */
+  #zenImage, .bookCover, .bookCoverPlaceholder {
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+  }
+
+  #bookmarkToast { position:fixed; left:50%; top:16px; transform:translateX(-50%);
+    background:var(--panel-bg); border:1px solid var(--border); color:var(--ink); padding:8px 16px;
+    border-radius:999px; font-size:13px; opacity:0; transition:opacity 0.3s;
+    pointer-events:none; z-index:20; white-space:nowrap; }
+  #bookmarkToast.show { opacity:1; }
+
+  #timeRow { display:flex; justify-content:space-between; font-size:12px; color:var(--timerow-ink); padding:0 2px; }
+
+  #progressTrack { position:relative; height:22px; display:flex; align-items:center; }
+  #progressTrackLine { position:relative; width:100%; height:3px; background:var(--progress-track); border-radius:2px; overflow:visible; }
+  #progressFill { position:absolute; left:0; top:0; height:100%; width:0%; background:var(--accent); border-radius:2px; }
+  #progressMarker { position:absolute; top:50%; left:0%; width:12px; height:12px; margin-left:-6px; margin-top:-6px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 6px rgba(224,138,60,0.15); }
+
+  /* Three-column grid, not a plain flex row: the outer two columns
+     (left info block, right pill column) size to their own content, and
+     the middle column - #playerControls - always gets whatever's left
+     over, which is exactly "centered between them" per the user's
+     mockup. align-items:center vertically centers all three columns
+     against the row's own height (driven by the 56px cover art), so
+     the button row is always middle-aligned with both info blocks too.
+     The middle column's minmax(36px, ...) floor (real bug, found via
+     testing at phone width with a long chapter/part pill string): with a
+     bare 1fr, grid happily lets the left column shrink only as far as
+     needed to fit the left+right columns' own content, then hands the
+     middle column whatever's left - which can be 0 when the outer two
+     alone already exceed the row's width, leaving the play/pause button
+     rendered with no box to center in and visually overlapping the pill
+     column next to it instead of looking "not centered." Reserving 36px
+     (one icon button) forces the left column to keep shrinking past that
+     point instead, since it's the only track with real give left (right
+     column's pill text is nowrap, effectively unshrinkable). */
+  #metaRow { display:grid; grid-template-columns: minmax(0, 220px) minmax(36px, 1fr) auto; align-items:center; gap:12px; }
+  #metaLeftInfo { display:flex; align-items:center; gap:12px; min-width:0; }
+  #coverArt, #coverPlaceholder { width:56px; height:56px; border-radius:6px; flex-shrink:0; object-fit:cover; background:var(--panel-bg-2); border:1px solid var(--border); }
+  #coverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:22px; }
+
+  #metaTextCol { min-width:0; display:flex; flex-direction:column; gap:8px; justify-content:center; }
+  #chapterTitle { min-width:0; font-size:16px; font-weight:600; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .marqueeBox { min-width:0; overflow:hidden; white-space:nowrap; font-size:12px; color:var(--muted); }
+  .marqueeBox .marqueeInner { display:inline-flex; }
+  .marqueeBox .marqueeGap { display:inline-block; width:36px; flex-shrink:0; }
+
+  /* Right column: chapter/speed pills, now stacked on their own (no
+     longer paired one-per-line with the title/author text) so the
+     middle column above has a real right edge to center against.
+     Explicit gap (not space-between) so the buffer between pills can't
+     collapse if pill height ever changes - 24px pill + 8px gap + 24px
+     pill = 56px, matching the cover art's height exactly. */
+  #metaPillCol { min-width:0; flex-shrink:0; display:flex; flex-direction:column; align-items:flex-end; justify-content:center; gap:8px; }
+  .marqueeBox.scrolling .marqueeInner { animation-name: marqueeScroll; animation-timing-function: linear; animation-iteration-count: infinite; }
+  @keyframes marqueeScroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+  /* Fixed height (not padding-driven) so chapterPill/speedPill render at
+     identical heights regardless of their differing content. */
+  .pill { flex-shrink:0; display:flex; align-items:center; gap:6px; height:24px; box-sizing:border-box; padding:0 12px; border-radius:999px; border:1px solid var(--border); background:var(--panel-bg); color:var(--ink); font-size:12px; white-space:nowrap; }
+  .pill svg { flex-shrink:0; }
+
+  #speedOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); align-items:center; justify-content:center; z-index:10; touch-action:none; }
+  #speedPanel { width:min(320px, 84vw); background:var(--panel-bg-2); border:1px solid var(--border); border-radius:16px; padding:20px; box-sizing:border-box; }
+  #speedValueRow { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  #speedValueRow button { width:40px; height:40px; border-radius:50%; border:1px solid var(--border); background:var(--control-btn-bg); color:var(--ink); font-size:20px; }
+  #speedValue { font-size:26px; font-weight:600; color:var(--accent); }
+  #speedSliderRow { display:flex; align-items:center; gap:10px; font-size:11px; color:var(--muted); margin-bottom:14px; }
+  #speedSlider { flex:1; }
+  #speedPresets { display:flex; justify-content:space-between; gap:6px; }
+  #speedPresets button { flex:1; padding:8px 0; border-radius:10px; border:1px solid var(--border); background:var(--control-btn-bg); color:var(--ink); font-size:12px; }
+</style>
+</head>
+<body>
+
+<div id="homeScreen">
+  <div id="homeHeader">
+    <div id="homeTitle">SHAMA</div>
+    <div id="homeSubtitle"><span class="subtitleInitial">S</span>tylish <span class="subtitleInitial">H</span>umanlike <span class="subtitleInitial">A</span>udiobook <span class="subtitleInitial">M</span>ultiplatform <span class="subtitleInitial">A</span>pplication</div>
+  </div>
+  <div id="modeRow">
+    <a class="modePill current" href="index.html">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      <span>Player</span>
+    </a>
+    <a class="modePill" href="remote.html">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="4"/><circle cx="12" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="16" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="none"/></svg>
+      <span>Remote</span>
+    </a>
+  </div>
+  <div id="homeGrid"></div>
+</div>
+
+<div id="deactivatedScreen">
+  <div id="deactivatedTitle">SHAMA</div>
+  <div id="deactivatedSubtitle">Playing on Other Device</div>
+  <div id="deactivatedHint">Refresh to play on this device</div>
+</div>
+
+<div id="libraryScreen">
+  <button id="allBooksBtn" aria-label="All books">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+  </button>
+  <h1 id="libraryTitle">JP Audiobook Player</h1>
+  <div id="libraryBody"></div>
+</div>
+
+<div id="readerScreen">
+  <div id="readerTopBar">
+    <button id="libraryBtn" class="iconBtn" aria-label="Back to library">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></svg>
+    </button>
+    <button id="bookmarkBtn" class="iconBtn" aria-label="Bookmark this spot">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4V3z"/></svg>
+    </button>
+  </div>
+  <button id="fullscreenToggleBtn" class="iconBtn" aria-label="Toggle fullscreen zen mode">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+  </button>
+  <button id="forceZenBtn" class="iconBtn" aria-label="Toggle zen mode">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+  </button>
+  <button id="themeToggleBtn" class="iconBtn" aria-label="Toggle light/dark theme">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+  </button>
+  <button id="presetToggleBtn" class="iconBtn" aria-label="Toggle text animation preset">あ</button>
+  <button id="volumeToggleBtn" class="iconBtn" aria-label="Volume">
+    <svg id="volumeIconNormal" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><path d="M16 8a5 5 0 0 1 0 8"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
+    <svg id="volumeIconMuted" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>
+  </button>
+  <div id="volumePopup">
+    <button id="volumeUpBtn" class="iconBtn" aria-label="Increase volume">+</button>
+    <div id="volumeLevelPill" class="iconBtn">100</div>
+    <button id="volumeDownBtn" class="iconBtn" aria-label="Decrease volume">&minus;</button>
+    <button id="muteBtn" class="iconBtn" aria-label="Mute">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>
+    </button>
+  </div>
+
+  <div id="frame">
+    <div id="pageText"></div>
+    <div id="loadingOverlay">Preparing chapter&hellip; <span id="loadingPercent">0</span>%</div>
+    <div id="measure"></div>
+    <div id="zenImageWrap"><img id="zenImage"></div>
+  </div>
+
+  <div id="bookmarkToast"></div>
+
+  <div id="zenChromeOverlay">
+  <div id="timeRow">
+    <span id="elapsedLabel">0:00</span>
+    <span id="totalLabel">0:00</span>
+  </div>
+  <div id="progressTrack">
+    <div id="progressTrackLine">
+      <div id="progressFill"></div>
+      <div id="progressMarker"></div>
+    </div>
+  </div>
+
+  <div id="metaRow">
+    <div id="metaLeftInfo">
+      <img id="coverArt" style="display:none;">
+      <div id="coverPlaceholder">&#9834;</div>
+      <div id="metaTextCol">
+        <div id="chapterTitle"></div>
+        <div id="authorTitle" class="marqueeBox"></div>
+      </div>
+    </div>
+
+    <div id="playerControls">
+      <button id="prevChapterBtn" class="iconBtn" aria-label="Previous chapter">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+      </button>
+      <button id="prevPartBtn" class="iconBtn" aria-label="Previous part">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button id="playPauseBtn" class="iconBtn" aria-label="Play">
+        <svg id="playIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><!-- Shifted 1.5 right of the bounding-box-centered original (5 19 5) -
+             a right-pointing triangle's flat left edge reads as heavier
+             than its tip, so bounding-box centering looks off-center to
+             the left; nudging it right is the standard optical fix. -->
+          <polygon points="6.5 3 20.5 12 6.5 21 6.5 3"/>
+        </svg>
+        <svg id="pauseIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+      <button id="nextPartBtn" class="iconBtn" aria-label="Next part">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+      <button id="nextChapterBtn" class="iconBtn" aria-label="Next chapter">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+      </button>
+    </div>
+
+    <div id="metaPillCol">
+      <div id="chapterPill" class="pill"></div>
+      <button id="speedPill" class="pill">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 12 L16 8"/><circle cx="12" cy="12" r="9"/></svg>
+        <span id="speedLabel">1.00x</span>
+      </button>
+    </div>
+  </div>
+  </div>
+
+  <audio id="audio"></audio>
+</div>
+
+<div id="speedOverlay">
+  <div id="speedPanel">
+    <div id="speedValueRow">
+      <button id="speedDown">&#8249;</button>
+      <div id="speedValue">1.00x</div>
+      <button id="speedUp">&#8250;</button>
+    </div>
+    <div id="speedSliderRow">
+      <span>0.25</span>
+      <input type="range" id="speedSlider" min="0.25" max="8" step="0.01" value="1">
+      <span>8.00</span>
+    </div>
+    <div id="speedPresets">
+      <button data-speed="0.8">0.8</button>
+      <button data-speed="1.0">1.0</button>
+      <button data-speed="1.25">1.25</button>
+      <button data-speed="1.5">1.5</button>
+      <button data-speed="2.0">2.0</button>
+    </div>
+  </div>
+</div>
+
+<script src="/bridge-shim.js"></script>
+<script>
+(function(){
+  var homeScreen = document.getElementById('homeScreen');
+  var homeTitle = document.getElementById('homeTitle');
+  var homeSubtitle = document.getElementById('homeSubtitle');
+  var modeRow = document.getElementById('modeRow');
+  var homeGrid = document.getElementById('homeGrid');
+  var libraryScreen = document.getElementById('libraryScreen');
+  var libraryTitle = document.getElementById('libraryTitle');
+  var libraryBody = document.getElementById('libraryBody');
+  var allBooksBtn = document.getElementById('allBooksBtn');
+  var readerScreen = document.getElementById('readerScreen');
+
+  var audio = document.getElementById('audio');
+  var pageText = document.getElementById('pageText');
+  var measure = document.getElementById('measure');
+  var frame = document.getElementById('frame');
+  var loadingOverlay = document.getElementById('loadingOverlay');
+  var loadingPercent = document.getElementById('loadingPercent');
+  var bookmarkToast = document.getElementById('bookmarkToast');
+  var libraryBtn = document.getElementById('libraryBtn');
+  var bookmarkBtn = document.getElementById('bookmarkBtn');
+  var presetToggleBtn = document.getElementById('presetToggleBtn');
+  var volumeToggleBtn = document.getElementById('volumeToggleBtn');
+  var volumePopup = document.getElementById('volumePopup');
+  var volumeUpBtn = document.getElementById('volumeUpBtn');
+  var volumeDownBtn = document.getElementById('volumeDownBtn');
+  var volumeLevelPill = document.getElementById('volumeLevelPill');
+  var muteBtn = document.getElementById('muteBtn');
+  var volumeIconNormal = document.getElementById('volumeIconNormal');
+  var volumeIconMuted = document.getElementById('volumeIconMuted');
+  var themeToggleBtn = document.getElementById('themeToggleBtn');
+  var fullscreenToggleBtn = document.getElementById('fullscreenToggleBtn');
+  var forceZenBtn = document.getElementById('forceZenBtn');
+  var zenImageWrap = document.getElementById('zenImageWrap');
+  var zenImage = document.getElementById('zenImage');
+
+  var elapsedLabel = document.getElementById('elapsedLabel');
+  var totalLabel = document.getElementById('totalLabel');
+  var progressTrack = document.getElementById('progressTrack');
+  var progressFill = document.getElementById('progressFill');
+  var progressMarker = document.getElementById('progressMarker');
+
+  var playerControls = document.getElementById('playerControls');
+  var prevChapterBtn = document.getElementById('prevChapterBtn');
+  var prevPartBtn = document.getElementById('prevPartBtn');
+  var playPauseBtn = document.getElementById('playPauseBtn');
+  var playIcon = document.getElementById('playIcon');
+  var pauseIcon = document.getElementById('pauseIcon');
+  var nextPartBtn = document.getElementById('nextPartBtn');
+  var nextChapterBtn = document.getElementById('nextChapterBtn');
+
+  var coverArt = document.getElementById('coverArt');
+  var coverPlaceholder = document.getElementById('coverPlaceholder');
+  var chapterTitleEl = document.getElementById('chapterTitle');
+  var authorTitleEl = document.getElementById('authorTitle');
+  var chapterPill = document.getElementById('chapterPill');
+
+  var speedPill = document.getElementById('speedPill');
+  var speedLabel = document.getElementById('speedLabel');
+  var speedOverlay = document.getElementById('speedOverlay');
+  var speedValue = document.getElementById('speedValue');
+  var speedSlider = document.getElementById('speedSlider');
+  var speedDown = document.getElementById('speedDown');
+  var speedUp = document.getElementById('speedUp');
+
+  var chunks = [];
+  var chapterTimeOffset = 0; // see seekToTime() - added to audio.currentTime
+                              // to get real chapter-relative time, since a
+                              // jumped-to resource reports its own time
+                              // starting from 0.
+  var idx = -1;
+  var shown = false;
+  var pendingChapterBase = null;
+  var pendingResumeSeconds = null;
+  var allChapters = [];
+  var chapterDuration = 0;
+  var durationKnown = false;
+  var currentSpeed = 1.0;
+  var scrubbing = false;
+  var chunkSpans = [];
+  var chunkLitCount = 0;
+  var PAD_X = 26, PAD_TOP = 64, PAD_BOTTOM = 26, MAX_F = 68, ABS_MIN = 10;
+  // Zen mode's padding on mobile/tablet (any coarse pointer, iPad
+  // included, regardless of its actual screen width - see the CSS
+  // comment on #readerScreen.zen #frame): flat 5% of screen height
+  // top+bottom, 5% of screen width left+right, plus a 2%-of-width gap
+  // between text and image. Kept in sync with that CSS rule.
+  var ZEN_TOP_BOTTOM_FRACTION = 0.05;
+  var ZEN_LEFT_FRACTION = 0.05;
+  var ZEN_RIGHT_FRACTION = 0.05;
+  var ZEN_GAP_FRACTION = 0.02;
+  // Desktop zen - right-anchored, same as mobile/tablet (see the CSS
+  // comment on #readerScreen.zen.desktop #frame for why a centered pair
+  // was tried first and reverted), just with its own symmetric padding
+  // values instead of mobile's asymmetric ones. Kept in sync with that
+  // CSS rule. Real fullscreen gets its own, more generous padding (kept
+  // in sync with #readerScreen.zen.desktop.fullscreen #frame instead) -
+  // see recalcZenColumns() below for which one actually applies.
+  var ZEN_DESKTOP_PADDING_V_FRACTION = 0.03;
+  var ZEN_DESKTOP_PADDING_H_FRACTION = 0.03;
+  var ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION = 0.05;
+  var ZEN_DESKTOP_GAP_FRACTION = 0.02;
+  var ZEN_DESKTOP_MIN_WIDTH = 800;
+
+  var zenActive = false;
+  var zenDesktopActive = false; // which zen sub-case is active, when zenActive is true
+  var zenImageList = [];
+  var zenCurrentImageUrl = null;
+  // Cached column layout - recomputed only by recalcZenColumns() (on
+  // resize/fullscreen-toggle/zen transitions), never per-chunk or per
+  // image-rotation, so the image/text split can't visibly shift outside
+  // an actual viewport change. See recalcZenColumns() below.
+  var zenColW = 0;
+  var zenImgColW = 0;
+  var zenRowH = 0;
+
+  function chapterNumber(base){
+    var m = base.match(/(\d+)$/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function humanize(base){
+    var n = chapterNumber(base);
+    return n !== null ? ('Chapter ' + n) : base;
+  }
+
+  function formatTime(s){
+    if (!isFinite(s) || s < 0) s = 0;
+    s = Math.round(s);
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
+    var mm = (h > 0 && m < 10) ? ('0' + m) : String(m);
+    var ss = sec < 10 ? ('0' + sec) : String(sec);
+    return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
+  }
+
+  // Home screen: a pill grid of every configured book, the app's actual
+  // entry point. Each pill's cover/title/author come straight from
+  // /api/books (server-resolved: book.json title, else the first
+  // chapter's ID3 album/artist tags, else the folder id) - no per-book
+  // metadata round-trip needed client-side. Current book (selectBook()'s
+  // choice, persisted in localStorage) is always sorted first.
+  async function renderHome(){
+    homeGrid.innerHTML = '';
+    var booksRes;
+    try {
+      booksRes = JSON.parse(await Android.listBooks());
+    } catch(e){
+      homeGrid.innerHTML = '<p id="emptyMsg">Could not read the configured book folders.</p>';
+      return;
+    }
+    var books = booksRes.books || [];
+    var currentBookId = await Android.currentBookId();
+    // Falls back to the first configured book if nothing's selected yet,
+    // or a previously-selected id no longer exists (e.g. config.json
+    // changed since) - same fallback listChapters() applies separately.
+    if (!books.some(function(b){ return b.id === currentBookId; })) {
+      currentBookId = books.length ? books[0].id : null;
+    }
+    books.sort(function(a, b){
+      if (a.id === currentBookId) return -1;
+      if (b.id === currentBookId) return 1;
+      return 0;
+    });
+
+    books.forEach(function(book){
+      var pill = document.createElement('div');
+      pill.className = 'bookPill' + (book.id === currentBookId ? ' current' : '');
+
+      var cover = document.createElement('img');
+      cover.className = 'bookCover';
+      cover.src = '/api/books/' + book.id + '/cover';
+      cover.onerror = function(){
+        cover.replaceWith(Object.assign(document.createElement('div'), {
+          className: 'bookCoverPlaceholder', innerHTML: '&#9834;'
+        }));
+      };
+      pill.appendChild(cover);
+
+      var titleEl = document.createElement('div');
+      titleEl.className = 'bookTitle';
+      titleEl.textContent = book.title;
+      pill.appendChild(titleEl);
+
+      var authorEl = document.createElement('div');
+      authorEl.className = 'bookAuthor';
+      authorEl.textContent = book.author || '';
+      pill.appendChild(authorEl);
+
+      pill.addEventListener('click', async function(){
+        await Android.selectBook(book.id);
+        homeScreen.style.display = 'none';
+        libraryScreen.style.display = 'flex';
+        renderLibrary();
+      });
+
+      homeGrid.appendChild(pill);
+    });
+  }
+
+  // Scales #homeTitle/#homeSubtitle's font-size proportionally (not a
+  // hardcoded value) so their rendered text width snugly fills the shared
+  // 800px/80vw box #homeTitle/#homeSubtitle/#modeRow all use (see the
+  // CSS) - measuring at a baseline size and computing a single scale
+  // factor works cleanly here since letter-spacing is em-based and
+  // therefore already scales linearly with font-size. A small safety
+  // factor avoids a 1-2px overflow from font-metric rounding at the
+  // target size.
+  function fitTextToWidth(el, targetWidth){
+    if (!targetWidth) return;
+    el.style.fontSize = '100px';
+    var natural = el.scrollWidth;
+    if (natural <= 0) return;
+    el.style.fontSize = (100 * (targetWidth / natural) * 0.98) + 'px';
+  }
+
+  function fitHomeHeader(){
+    if (homeScreen.style.display === 'none') return; // nothing to measure while hidden
+    fitTextToWidth(homeTitle, homeTitle.clientWidth);
+    // Below 1080px #homeSubtitle is hidden entirely (see CSS) - too long
+    // to keep pace with the title's own flexed width - so it's skipped
+    // here too, and the subtitle-to-modeRow buffer (set to match the
+    // subtitle's own height, per spec) falls back to the CSS default gap.
+    if (getComputedStyle(homeSubtitle).display !== 'none') {
+      fitTextToWidth(homeSubtitle, homeSubtitle.clientWidth);
+      modeRow.style.marginTop = (homeSubtitle.offsetHeight / 2) + 'px';
+    } else {
+      modeRow.style.marginTop = '';
+    }
+  }
+  window.addEventListener('resize', fitHomeHeader);
+
+  function goHome(){
+    libraryScreen.style.display = 'none';
+    homeScreen.style.display = 'block';
+    renderHome();
+    fitHomeHeader();
+  }
+
+  allBooksBtn.addEventListener('click', goHome);
+
+  async function renderLibrary(){
+    var data;
+    try {
+      data = JSON.parse(await Android.listChapters());
+    } catch(e){
+      libraryBody.innerHTML = '<p id="emptyMsg">Could not read the library folder.</p>';
+      return;
+    }
+
+    libraryBody.innerHTML = '';
+
+    if(!data.hasFolder){
+      var btn = document.createElement('button');
+      btn.id = 'chooseFolderBtn';
+      btn.textContent = 'Choose audiobook folder';
+      btn.addEventListener('click', function(){ Android.pickFolder(); });
+      libraryBody.appendChild(btn);
+      allChapters = [];
+      return;
+    }
+
+    allChapters = data.chapters || [];
+
+    // Left column: same cover/title/author pill as the home screen grid,
+    // just not clickable here (this already *is* the selected book).
+    var leftCol = document.createElement('div');
+    leftCol.className = 'bookPill libraryBookPill';
+    var cover = document.createElement('img');
+    cover.className = 'bookCover';
+    cover.src = '/api/books/' + data.bookId + '/cover';
+    cover.onerror = function(){
+      cover.replaceWith(Object.assign(document.createElement('div'), {
+        className: 'bookCoverPlaceholder', innerHTML: '&#9834;'
+      }));
+    };
+    leftCol.appendChild(cover);
+    var leftTitle = document.createElement('div');
+    leftTitle.className = 'bookTitle';
+    leftTitle.textContent = data.bookTitle || 'JP Audiobook Player';
+    leftCol.appendChild(leftTitle);
+    var leftAuthor = document.createElement('div');
+    leftAuthor.className = 'bookAuthor';
+    leftAuthor.textContent = data.bookAuthor || '';
+    leftCol.appendChild(leftAuthor);
+
+    // Left column wrapper: album art pill, then Continue directly below
+    // it (if a resume position exists) - same relative DOM position
+    // works for both the >=900px side-by-side layout (Continue sits
+    // under the art pill within this one stacked unit) and the <900px
+    // single-column layout (this whole wrapper is "the first thing",
+    // so Continue naturally lands right after the art there too,
+    // without needing separate positioning logic per breakpoint).
+    var leftColWrap = document.createElement('div');
+    leftColWrap.id = 'libraryLeftColWrap';
+    leftColWrap.appendChild(leftCol);
+    libraryBody.appendChild(leftColWrap);
+
+    var extra = { lastPosition: null, bookmarks: [] };
+    try { extra = JSON.parse(await Android.listBookmarksAndLastPosition()); } catch(e){}
+
+    if (extra.lastPosition) {
+      var continuePill = document.createElement('button');
+      continuePill.className = 'chapterPill continuePill';
+      continuePill.textContent = 'Continue: ' + humanize(extra.lastPosition.chapterBase) +
+        ' (' + formatTime(extra.lastPosition.positionSeconds) + ')';
+      continuePill.addEventListener('click', function(){
+        sendSelfLoad(data.bookId, extra.lastPosition.chapterBase, extra.lastPosition.positionSeconds);
+      });
+      leftColWrap.appendChild(continuePill);
+    }
+
+    // Right column: chapter pills (no Continue mixed in anymore) + bookmarks.
+    var rightCol = document.createElement('div');
+    rightCol.id = 'libraryRightCol';
+
+    var chapterWrap = document.createElement('div');
+    chapterWrap.id = 'chapterPillsWrap';
+    rightCol.appendChild(chapterWrap);
+    libraryBody.appendChild(rightCol);
+
+    if (data.chapters.length === 0) {
+      var msg = document.createElement('p');
+      msg.id = 'emptyMsg';
+      msg.textContent = 'No chapter_XXX.mp3 files found in this folder yet.';
+      chapterWrap.appendChild(msg);
+    } else {
+      var makeChapterPill = function(base){
+        var pill = document.createElement('button');
+        pill.className = 'chapterPill';
+        pill.textContent = humanize(base);
+        // Persistent chapter progress: re-opening the chapter you were
+        // already on resumes where you left off instead of restarting at
+        // 0 - only the single most-recently-active chapter is remembered
+        // (the existing last-position row), not full per-chapter history.
+        var resumeSeconds = (extra.lastPosition && extra.lastPosition.chapterBase === base) ? extra.lastPosition.positionSeconds : 0;
+        pill.addEventListener('click', function(){ sendSelfLoad(data.bookId, base, resumeSeconds); });
+        return pill;
+      };
+
+      // Single column first, Chapter 1, 2, 3... in order. chapterWrap is
+      // already attached to the live document (appended above), so its
+      // measured height below reflects real layout, not a detached-node
+      // zero.
+      var singleCol = document.createElement('div');
+      singleCol.className = 'pillWrap';
+      data.chapters.forEach(function(base){ singleCol.appendChild(makeChapterPill(base)); });
+      chapterWrap.appendChild(singleCol);
+
+      if (singleCol.getBoundingClientRect().height > 400) {
+        // Doesn't fit - rebuild as two explicit sub-columns rather than
+        // relying on flex-wrap's row-major order, so the left sub-column
+        // fills with 1, 2, 3... first (as many as fit in 400px) and the
+        // rest continue into the right sub-column, which is allowed to
+        // grow past 400px if even that overflows.
+        chapterWrap.innerHTML = '';
+        var GAP = 8, PILL_H = 35;
+        var capacity = Math.max(1, Math.floor((400 + GAP) / (PILL_H + GAP)));
+        var leftChapters = data.chapters.slice(0, capacity);
+        var rightChapters = data.chapters.slice(capacity);
+
+        var twoColRow = document.createElement('div');
+        twoColRow.className = 'twoColRow';
+        var leftSubCol = document.createElement('div');
+        leftSubCol.className = 'pillWrap';
+        leftChapters.forEach(function(base){ leftSubCol.appendChild(makeChapterPill(base)); });
+        var rightSubCol = document.createElement('div');
+        rightSubCol.className = 'pillWrap';
+        rightChapters.forEach(function(base){ rightSubCol.appendChild(makeChapterPill(base)); });
+        twoColRow.appendChild(leftSubCol);
+        twoColRow.appendChild(rightSubCol);
+        chapterWrap.appendChild(twoColRow);
+      }
+    }
+
+    renderBookmarksSection(rightCol, extra.bookmarks || [], data.bookId);
+  }
+
+  var DELETE_WIDTH = 72;
+
+  // Swipe-to-reveal-delete bookmark list, "under" the Change folder
+  // button. Only one row can be open at a time; a tap while a row is
+  // already open just closes it instead of navigating (standard
+  // swipe-list convention), a tap while closed resumes to that bookmark.
+  function renderBookmarksSection(rightCol, bookmarks, bookId){
+    if (!bookmarks.length) return;
+
+    var section = document.createElement('div');
+    var label = document.createElement('div');
+    label.className = 'sectionLabel';
+    label.textContent = 'Bookmarks';
+    section.appendChild(label);
+    var bookmarkWrapEl = document.createElement('div');
+    bookmarkWrapEl.className = 'pillWrap';
+    section.appendChild(bookmarkWrapEl);
+    rightCol.appendChild(section);
+
+    var openRowWrap = null;
+
+    bookmarks.forEach(function(bm){
+      var wrap = document.createElement('div');
+      wrap.className = 'bookmarkWrap';
+
+      var deleteBtn = document.createElement('button');
+      deleteBtn.className = 'bookmarkDelete';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.addEventListener('click', async function(){
+        // Awaited (unlike the Android version, where this bridge call was
+        // synchronous) so renderLibrary() doesn't re-render against a
+        // still-stale bookmark list while the delete is in flight.
+        await Android.deleteBookmark(bm.id);
+        renderLibrary();
+      });
+
+      var row = document.createElement('button');
+      row.className = 'chapterPill bookmarkRow';
+      row.textContent = bm.label + ' — ' + humanize(bm.chapterBase);
+      row.style.touchAction = 'pan-y';
+
+      var isOpen = false;
+      var dragStartX = null;
+      var baseX = 0;
+
+      function setOffset(px){
+        row.style.transform = 'translateX(' + px + 'px)';
+      }
+
+      wrap._closeBookmarkRow = function(){
+        isOpen = false;
+        row.style.transition = 'transform 0.2s';
+        setOffset(0);
+      };
+
+      row.addEventListener('pointerdown', function(e){
+        dragStartX = e.clientX;
+        baseX = isOpen ? -DELETE_WIDTH : 0;
+        row.style.transition = 'none';
+        try { row.setPointerCapture(e.pointerId); } catch(err){}
+      });
+
+      row.addEventListener('pointermove', function(e){
+        if (dragStartX === null) return;
+        var offset = baseX + (e.clientX - dragStartX);
+        offset = Math.max(-DELETE_WIDTH, Math.min(0, offset));
+        setOffset(offset);
+      });
+
+      row.addEventListener('pointerup', function(e){
+        if (dragStartX === null) return;
+        var dx = e.clientX - dragStartX;
+        dragStartX = null;
+        row.style.transition = 'transform 0.2s';
+
+        if (Math.abs(dx) < 8) {
+          // Tap, not a drag.
+          if (isOpen) {
+            wrap._closeBookmarkRow();
+          } else {
+            sendSelfLoad(bookId, bm.chapterBase, bm.positionSeconds);
+          }
+          return;
+        }
+
+        var finalOffset = baseX + dx;
+        if (finalOffset <= -DELETE_WIDTH / 2) {
+          if (openRowWrap && openRowWrap !== wrap) openRowWrap._closeBookmarkRow();
+          openRowWrap = wrap;
+          isOpen = true;
+          setOffset(-DELETE_WIDTH);
+        } else {
+          isOpen = false;
+          setOffset(0);
+        }
+      });
+
+      row.addEventListener('pointercancel', function(){
+        dragStartX = null;
+      });
+
+      wrap.appendChild(deleteBtn);
+      wrap.appendChild(row);
+      bookmarkWrapEl.appendChild(wrap);
+    });
+  }
+
+  window.onFolderPicked = function(){
+    renderLibrary();
+  };
+
+  function goToLibrary(){
+    audio.pause();
+    readerScreen.style.display = 'none';
+    libraryScreen.style.display = 'flex';
+    Android.stopPlaybackSession();
+    try { Android.setImmersiveMode(false); } catch(e){}
+    // Without this, the screen just re-shows whatever DOM renderLibrary()
+    // last built (e.g. from when the book was first selected) - stale
+    // Continue pill / bookmark list, since neither updates live while
+    // reading. Re-fetch so a bookmark just saved (or resume position just
+    // moved) shows up without a detour through the home screen.
+    renderLibrary();
+  }
+
+  async function openChapter(base, resumeSeconds){
+    var syncText = await Android.readTextFile(base + '.sync.json');
+    var data;
+    try {
+      data = JSON.parse(syncText);
+    } catch(e){
+      alert('Could not read ' + base + '.sync.json');
+      return;
+    }
+    chunks = data.chunks || [];
+    idx = -1;
+    shown = false;
+    audio.pause();
+
+    pendingChapterBase = base;
+    pendingResumeSeconds = (typeof resumeSeconds === 'number' && resumeSeconds > 0) ? resumeSeconds : null;
+    durationKnown = false;
+    chapterDuration = chunks.length ? chunks[chunks.length - 1].end : 0;
+    totalLabel.textContent = formatTime(chapterDuration);
+    elapsedLabel.textContent = '0:00';
+    renderTimeUI(0);
+
+    chapterTitleEl.textContent = humanize(base);
+    authorTitleEl.textContent = '';
+    coverArt.style.display = 'none';
+    coverPlaceholder.style.display = 'flex';
+    updateChapterPill();
+
+    libraryScreen.style.display = 'none';
+    readerScreen.style.display = 'flex';
+    pageText.style.display = 'none';
+    loadingOverlay.style.display = 'block';
+    loadingPercent.textContent = '0';
+
+    Android.prepareChapterAudio(base);
+  }
+
+  window.onAudioPrepareProgress = function(base, percent){
+    if (base !== pendingChapterBase) return;
+    loadingPercent.textContent = percent;
+  };
+
+  window.onAudioPrepareReady = async function(base, metadataJson){
+    if (base !== pendingChapterBase) return;
+    loadingOverlay.style.display = 'none';
+    pageText.style.display = 'flex';
+
+    // Metadata/zen-images resolved BEFORE the first updateForTime() call
+    // below (not after, despite matching the original call order more
+    // closely) - updateForTime() is what actually shows the zen image via
+    // updateZenImageForTime(), and it needs coverArt.src (the ID3-cover
+    // fallback) and zenImageList already in place on its very first tick,
+    // not one tick later. Awaited (unlike the Android version, where the
+    // equivalent bridge call was synchronous) since resolveChapterImages
+    // is now a real fetch() - without the await, applyZenState() below
+    // could run against a still-empty zenImageList.
+    var meta = {};
+    try { meta = JSON.parse(metadataJson || '{}'); } catch(e){}
+    applyMetadata(meta);
+    await loadZenImagesForChapter(base);
+    // If the phone's already physically landscape, start directly in zen
+    // mode rather than requiring an extra rotation round-trip.
+    applyZenState();
+
+    var resumeSeconds = pendingResumeSeconds;
+    pendingResumeSeconds = null;
+
+    if (resumeSeconds) {
+      // seekToTime() only ever sets audio.currentTime - it assumes a
+      // source is already loaded (true for every other call site: drag-
+      // to-seek/next-part/prev-part all act on a chapter that's already
+      // playing). This is the one call site opening a chapter fresh, so
+      // audio.src has to be set here too, same as the plain-open branch
+      // below - without it, currentTime/play() are silent no-ops against
+      // an empty <audio> element (readyState 0), which read as a fully
+      // stuck player: progress bar frozen, next/prev part unable to
+      // recover since they also just call seekToTime(); only opening a
+      // different chapter worked, since that goes through the plain-open
+      // branch below and sets src there.
+      chapterTimeOffset = 0;
+      audio.src = window.audioUrl(base);
+      audio.playbackRate = currentSpeed;
+      // seekToTime() only resumes playback itself if audio was already
+      // playing before the seek (drag-to-seek/next/prev case) - nothing
+      // has played yet here, so it won't auto-play on its own; call
+      // play() explicitly, same as the fresh-open branch below already does.
+      seekToTime(resumeSeconds);
+      audio.play().catch(function(e){ console.log('resume autoplay failed: ' + e); });
+    } else {
+      chapterTimeOffset = 0;
+      audio.src = window.audioUrl(base);
+      audio.playbackRate = currentSpeed;
+      updateForTime(0);
+      audio.play().catch(function(e){ console.log('autoplay failed: ' + e); });
+    }
+  };
+
+  window.onAudioPrepareFailed = function(base, reason){
+    if (base !== pendingChapterBase) return;
+    alert('Could not prepare audio for ' + base + ': ' + reason + ' - check Logcat (tag ChapterAudio) for details.');
+    loadingOverlay.style.display = 'none';
+    pageText.style.display = 'flex';
+    readerScreen.style.display = 'none';
+    libraryScreen.style.display = 'flex';
+  };
+
+  function applyMetadata(meta){
+    // Top line is the author - the chapter identity is already covered by
+    // chapterPill (e.g. "Chapter 2/2"), so this line is more useful showing
+    // who's reading/writing. Falls back to the chapter title tag, then
+    // whatever openChapter() already put there (humanizeChapterName), if
+    // there's no artist tag.
+    var title = (meta.title || '').trim();
+    var author = (meta.artist || '').trim();
+    var album = (meta.album || '').trim();
+    if (author) {
+      chapterTitleEl.textContent = author;
+    } else if (title) {
+      chapterTitleEl.textContent = title;
+    }
+
+    // Bottom line is the book title alone now (author moved up) - stretched
+    // across its row by .marqueeBox's flex:1 already, scrolls via
+    // setupMarquee() if it doesn't fit.
+    setupMarquee(authorTitleEl, album);
+
+    if (meta.hasCover) {
+      coverArt.src = window.coverUrl(pendingChapterBase);
+      coverArt.style.display = 'block';
+      coverPlaceholder.style.display = 'none';
+    } else {
+      coverArt.style.display = 'none';
+      coverPlaceholder.style.display = 'flex';
+    }
+  }
+
+  function setupMarquee(el, text){
+    el.classList.remove('scrolling');
+    el.innerHTML = '';
+    if (!text) return;
+
+    var inner = document.createElement('span');
+    inner.className = 'marqueeInner';
+    var first = document.createElement('span');
+    first.textContent = text;
+    inner.appendChild(first);
+    var gap = document.createElement('span');
+    gap.className = 'marqueeGap';
+    inner.appendChild(gap);
+    var second = document.createElement('span');
+    second.textContent = text;
+    inner.appendChild(second);
+    el.appendChild(inner);
+
+    requestAnimationFrame(function(){
+      if (inner.scrollWidth > el.clientWidth * 1.9) {
+        var singleWidth = inner.scrollWidth / 2;
+        var duration = Math.max(6, singleWidth / 40);
+        inner.style.animationDuration = duration + 's';
+        el.classList.add('scrolling');
+      } else {
+        second.remove();
+        gap.remove();
+      }
+    });
+  }
+
+  // Numerator/denominator are the real chapter numbers parsed from the
+  // filenames, not folder-relative position - chapters get copied to the
+  // phone in batches and old ones deleted after reading, so the folder
+  // is rarely a contiguous 1..N run (e.g. only chapters 5-10 present
+  // should read "5/10" while chapter 5 is open, not "1/6").
+  function updateChapterPill(){
+    var chapterIndex = chapterNumber(pendingChapterBase) || 0;
+    var chapterTotal = allChapters.reduce(function(max, base){
+      var n = chapterNumber(base);
+      return (n !== null && n > max) ? n : max;
+    }, 0);
+    var chunkPos = idx >= 0 ? (idx + 1) : 0;
+    chapterPill.textContent = 'Chapter: ' + chapterIndex + '/' + chapterTotal + ' Part: ' + chunkPos + '/' + chunks.length;
+    updateChapterNavButtons();
+  }
+
+  // Prev/Next Chapter (the player-controls row's bigger jump, vs.
+  // Prev/Next Part which is the existing goPrev()/goNext() chunk seek) -
+  // grey out at the ends of allChapters, same list continuous playback
+  // (the 'ended' handler below) already walks.
+  function updateChapterNavButtons(){
+    var pos = allChapters.indexOf(pendingChapterBase);
+    prevChapterBtn.disabled = !(pos > 0);
+    nextChapterBtn.disabled = !(pos >= 0 && pos < allChapters.length - 1);
+    updatePlayerControlsFit();
+  }
+
+  function goPrevChapter(){
+    var pos = allChapters.indexOf(pendingChapterBase);
+    if (pos > 0) openChapter(allChapters[pos - 1]);
+  }
+
+  function goNextChapter(){
+    var pos = allChapters.indexOf(pendingChapterBase);
+    if (pos >= 0 && pos < allChapters.length - 1) openChapter(allChapters[pos + 1]);
+  }
+
+  // Which buttons show is decided by measuring the row itself, not a
+  // fixed viewport-width breakpoint - #playerControls is a stretched grid
+  // child of #metaRow's middle (1fr) column, so its clientWidth already
+  // equals the real leftover width between the left info block and the
+  // right pill column. Chapter-skip buttons drop first (bigger jump, less
+  // essential at a glance), then part-skip, leaving just play/pause - the
+  // same fit check both decides "not enough width for all buttons" and
+  // guarantees the row can never grow wide enough to crowd its neighbors,
+  // since dropping buttons only ever shrinks the centered group symmetrically.
+  var PLAYER_CONTROLS_BTN = 36;
+  var PLAYER_CONTROLS_GAP = 20;
+  function playerControlsRowWidth(n){
+    return n * PLAYER_CONTROLS_BTN + (n - 1) * PLAYER_CONTROLS_GAP;
+  }
+  // Below this real device width (a 412px phone's own viewport, per
+  // on-device testing), even a lone play/pause button - already the
+  // last one left after hide-chapter+hide-part - crowds a long
+  // "Chapter: X/Y Part: A/B" pill with no breathing room. This check is
+  // independent of the content-fit measurement above (a fixed viewport
+  // width, not a measured one), since it's specifically about not
+  // rendering the button at all below a known-bad real width, not about
+  // whatever happens to fit.
+  var PLAYER_CONTROLS_MIN_VIEWPORT = 450;
+
+  function updatePlayerControlsFit(){
+    playerControls.classList.remove('hide-chapter', 'hide-part');
+    var available = playerControls.clientWidth;
+    if (playerControlsRowWidth(5) > available) {
+      playerControls.classList.add('hide-chapter');
+      if (playerControlsRowWidth(3) > available) playerControls.classList.add('hide-part');
+    }
+    playerControls.classList.toggle('hide-playpause', window.innerWidth < PLAYER_CONTROLS_MIN_VIEWPORT);
+  }
+  window.addEventListener('resize', updatePlayerControlsFit);
+
+  function fitFontSize(text, availW, availH){
+    measure.style.height = availH + 'px';
+    for(var f = MAX_F; f >= ABS_MIN; f -= 1){
+      measure.style.fontSize = f + 'px';
+      measure.textContent = text;
+      if(measure.scrollWidth <= availW) return f;
+    }
+    return ABS_MIN;
+  }
+
+  // Recomputes the cached zen column widths (zenColW/zenImgColW/zenRowH)
+  // against the frame's *current* box - called only from genuine
+  // layout-changing events (resize, fullscreen toggle, zen state
+  // transitions), never per-chunk and never when the side image simply
+  // rotates to a different picture. The image and text columns split
+  // the available width evenly (not "image gets its natural aspect-ratio
+  // width, text gets whatever's left") - previously, since a different
+  // image (chapter-image rotation, a new chapter, or the ID3-cover
+  // fallback) almost always has a different aspect ratio, giving the
+  // image an auto width let it (and consequently the text next to it)
+  // visibly resize/reposition every time the picture changed, which
+  // wasn't a pleasant reading experience. Fixed, evenly-split columns
+  // plus #zenImage's object-fit:contain (see the CSS) mean a
+  // differently-shaped image just letterboxes within its own unchanged
+  // box instead of resizing it.
+  function recalcZenColumns(){
+    if (!zenActive) return;
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var leftPad, rightPad, topBottomPad, gapW;
+    if (zenDesktopActive) {
+      // Centered pair - symmetric padding, no "leftover space" side.
+      // Real fullscreen gets the more generous 10%/10% padding; a wide
+      // window that isn't actually fullscreen keeps the tighter 3%/3%.
+      var desktopPadFraction = document.fullscreenElement
+        ? ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION
+        : ZEN_DESKTOP_PADDING_H_FRACTION;
+      var desktopPadVFraction = document.fullscreenElement
+        ? ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION
+        : ZEN_DESKTOP_PADDING_V_FRACTION;
+      leftPad = vw * desktopPadFraction;
+      rightPad = leftPad;
+      topBottomPad = vh * desktopPadVFraction;
+      gapW = vw * ZEN_DESKTOP_GAP_FRACTION;
+    } else {
+      leftPad = vw * ZEN_LEFT_FRACTION;
+      rightPad = vw * ZEN_RIGHT_FRACTION;
+      topBottomPad = vh * ZEN_TOP_BOTTOM_FRACTION;
+      gapW = vw * ZEN_GAP_FRACTION;
+    }
+    var innerW = frame.clientWidth - leftPad - rightPad;
+    var imgH = frame.clientHeight - topBottomPad * 2;
+    var colW = (innerW - gapW) / 2;
+    zenImgColW = Math.max(20, colW);
+    zenColW = Math.max(40, colW);
+    zenRowH = imgH;
+    zenImageWrap.style.width = zenImgColW + 'px';
+    zenImageWrap.style.height = zenRowH + 'px';
+  }
+
+  // Outside zen mode (or zen with no image resolved for this chapter -
+  // e.g. no folder images and no ID3 cover either): same math as
+  // before, just the asymmetric top padding that clears the icon
+  // buttons. In zen mode, this is now just a cheap read of the cached
+  // column widths recalcZenColumns() already computed - see there for
+  // why the split is fixed/even rather than measured fresh here.
+  function getAvailableSpace(){
+    if (!zenActive || zenImageWrap.style.display === 'none') {
+      return {
+        w: frame.clientWidth - PAD_X * 2,
+        h: frame.clientHeight - PAD_TOP - PAD_BOTTOM
+      };
+    }
+    return { w: zenColW, h: zenRowH };
+  }
+
+  function showPage(i){
+    var chunk = chunks[i];
+    var space = getAvailableSpace();
+    var f = fitFontSize(chunk.text, space.w, space.h);
+    // Text block's height is synced to the zen image's rendered height so
+    // their top/bottom edges align (spec: "vertically centered as a
+    // pair"); '' outside zen falls back to the normal CSS height:100% rule.
+    pageText.style.height = (zenActive && zenImageWrap.style.display !== 'none') ? (space.h + 'px') : '';
+    pageText.style.opacity = '0';
+    pageText.style.fontSize = f + 'px';
+
+    // One span per character (not per textContent string) so playback
+    // progress through the chunk can be shown by recoloring characters
+    // one at a time - see updateChunkHighlight(). Array.from (not a plain
+    // for-loop over string indices) so a surrogate-pair character doesn't
+    // get split across two spans.
+    pageText.innerHTML = '';
+    chunkSpans = Array.from(chunk.text).map(function(ch){
+      var span = document.createElement('span');
+      span.textContent = ch;
+      pageText.appendChild(span);
+      return span;
+    });
+
+    // Chromium can cache pageText's wrapped-column width from before this
+    // batch of per-character spans went in and not recompute it - it then
+    // renders as one long unwrapped column overflowing past the frame
+    // instead of wrapping into a new one, until something forces a real
+    // style invalidation. A display toggle forces that reliably, and it's
+    // invisible here since it happens inside the opacity:0 window above,
+    // before the fade-in below.
+    pageText.style.display = 'none';
+    void pageText.offsetHeight;
+    pageText.style.display = '';
+
+    // The first PRELIT_COUNT characters read as already "caught up" the
+    // instant the page appears, rather than visibly waiting for playback
+    // progress to reach them - matches the natural lead-in beat of the
+    // narration for those first couple of characters.
+    chunkLitCount = Math.min(PRELIT_COUNT, chunkSpans.length);
+    applyInitialSpanState();
+
+    requestAnimationFrame(function(){ pageText.style.opacity = '1'; });
+  }
+
+  function blankPage(){
+    pageText.style.opacity = '0';
+    pageText.innerHTML = '';
+    chunkSpans = [];
+    chunkLitCount = 0;
+  }
+
+  // --- Zen mode: distraction-free side-image layout, with two entirely
+  // independent triggers depending on device class:
+  //
+  // Mobile/tablet (coarse pointer): physically rotating to landscape
+  // (like a video player going fullscreen), not a manual toggle - rides
+  // Android's/the OS's own rotation pipeline via matchMedia rather than
+  // a raw sensor, so "never trigger zen mode when rotation-lock is on"
+  // comes for free with zero native code. A coarse (touch) pointer is
+  // required alongside the orientation match because a plain
+  // "(orientation: landscape)" match is true for essentially any normal
+  // desktop/laptop browser window (width > height is the common case,
+  // not a deliberate rotation) - confirmed by actually testing this
+  // build in a desktop-shaped browser window.
+  //
+  // Desktop (fine pointer): purely window-width-driven, live on resize -
+  // no rotation concept applies. This is a *different* zen sub-case
+  // (.zen.desktop, its own symmetric padding - see the CSS) and does
+  // NOT by itself hide any chrome;
+  // that's the separate, independent .chrome-hidden layer below, driven
+  // by real fullscreen (since desktop has no rotation to reveal/hide
+  // chrome against, and resizing the window shouldn't surprise-hide the
+  // icon row).
+  var zenMql = window.matchMedia('(orientation: landscape)');
+  var zenCoarsePointerMql = window.matchMedia('(pointer: coarse)');
+
+  function applyZenState(){
+    if (readerScreen.style.display !== 'flex') return; // only while a chapter's open
+    var mobileMatch = zenMql.matches && zenCoarsePointerMql.matches;
+    var desktopMatch = !zenCoarsePointerMql.matches && window.innerWidth >= ZEN_DESKTOP_MIN_WIDTH;
+    var next = mobileMatch || desktopMatch;
+    var stateChanged = (next !== zenActive) || (desktopMatch !== zenDesktopActive);
+    // Nothing to do: zen wasn't active and still isn't (the common case
+    // on every plain resize/mousemove-driven call while just reading
+    // normally). If zen IS active, though, still fall through even when
+    // stateChanged is false - a resize while already in zen (e.g.
+    // dragging a desktop window wider) needs recalcZenColumns() to
+    // re-run, which is exactly the "column width only changes on a real
+    // viewport change, never per-chunk" fix this exists for.
+    if (!stateChanged && !zenActive) return;
+
+    var wasMobileZen = zenActive && !zenDesktopActive;
+    zenActive = next;
+    zenDesktopActive = desktopMatch;
+
+    if (stateChanged) {
+      readerScreen.classList.toggle('zen', zenActive);
+      readerScreen.classList.toggle('desktop', zenDesktopActive);
+      if (mobileMatch !== wasMobileZen) {
+        // Only the mobile path drives real OS immersive mode and the
+        // initial chrome-hidden state on entry - desktop's chrome
+        // visibility is driven entirely separately, by real fullscreen
+        // (see applyDesktopFullscreenChrome() below).
+        try { Android.setImmersiveMode(mobileMatch); } catch(e){}
+        readerScreen.classList.toggle('chrome-hidden', mobileMatch);
+      }
+    }
+
+    if (zenActive) recalcZenColumns();
+    if (shown && idx >= 0) showPage(idx);
+    updateZenImageForTime((audio.currentTime || 0) + chapterTimeOffset);
+  }
+
+  if (zenMql.addEventListener) zenMql.addEventListener('change', applyZenState);
+  else zenMql.addListener(applyZenState); // older WebView fallback
+  // Belt-and-suspenders: some OEM WebViews may fire resize before (or
+  // instead of) the matchMedia change event on rotation - also how the
+  // desktop width-based trigger above is kept live while resizing.
+  window.addEventListener('resize', applyZenState);
+
+  // Mobile/tablet zen: pausing reveals the icon row + progress/info row
+  // (like a video player showing controls when paused), playing again
+  // hides them - independent of .zen itself, which stays on throughout.
+  // No-op outside mobile zen (desktop chrome is fullscreen-driven, not
+  // playback-driven).
+  function updateChromeForPlaybackState(){
+    if (!zenActive || zenDesktopActive) return;
+    readerScreen.classList.toggle('chrome-hidden', !audio.paused);
+  }
+
+  // Manual zen override (mobile/tablet only, see the (pointer: coarse)
+  // CSS gate on #forceZenBtn) for users with rotation-lock on, who can
+  // never satisfy zenMql.matches. Forces the same .zen/.chrome-hidden
+  // state applyZenState() would set for a real rotation, independent of
+  // actual orientation; tapping again releases the override back to
+  // whatever the real orientation/width would naturally produce.
+  var zenForcedOn = false;
+  forceZenBtn.addEventListener('click', function(){
+    zenForcedOn = !zenForcedOn;
+    forceZenBtn.classList.toggle('active', zenForcedOn);
+    if (readerScreen.style.display !== 'flex') return;
+    if (zenForcedOn) {
+      zenActive = true;
+      zenDesktopActive = false;
+      readerScreen.classList.add('zen');
+      readerScreen.classList.remove('desktop');
+      readerScreen.classList.add('chrome-hidden');
+      try { Android.setImmersiveMode(true); } catch(e){}
+      recalcZenColumns();
+      if (shown && idx >= 0) showPage(idx);
+      updateZenImageForTime((audio.currentTime || 0) + chapterTimeOffset);
+      // Chrome-hidden on mobile is otherwise only reachable by playing
+      // (see updateChromeForPlaybackState()) - auto-play here so forcing
+      // zen is a single tap that actually delivers hidden chrome +
+      // running audio, instead of forcing zen then still needing a
+      // separate tap-to-play on the text area.
+      if (audio.paused) audio.play();
+    } else {
+      // Release the override, then let the real orientation/width decide.
+      // Set to a value that can never equal applyZenState()'s freshly
+      // computed "next" (true/false) so its no-op guard can't short
+      // circuit here and skip actually re-applying the real state -
+      // found via testing: setting zenActive to a real boolean first
+      // let the guard see "no change" and leave the stale .zen/
+      // .chrome-hidden classes in place even though the state had
+      // genuinely changed (forced -> real).
+      zenActive = null;
+      applyZenState();
+    }
+  });
+
+  // --- Desktop-only: real fullscreen (F11 itself is invisible to the
+  // page - it fires no event and leaves document.fullscreenElement null,
+  // confirmed before building this - only requestFullscreen()/
+  // exitFullscreen(), triggered from an in-page control, is detectable).
+  // #fullscreenToggleBtn calls that directly; fullscreenchange reacts to
+  // the resulting state regardless of what caused it. Chrome visibility
+  // here is intentionally independent of .zen/.desktop (see above) -
+  // entering fullscreen at <800px still hides chrome around the
+  // plain text-only layout.
+  function applyDesktopFullscreenChrome(){
+    if (zenCoarsePointerMql.matches) return; // desktop-only
+    var fs = !!document.fullscreenElement;
+    readerScreen.classList.toggle('chrome-hidden', fs);
+    // Chrome-as-overlay (see #zenChromeOverlay's CSS) only makes sense
+    // while chrome can actually toggle away - true fullscreen here, or
+    // mobile's own play/pause-driven toggle. In a normal (non-fullscreen)
+    // desktop window, chrome is always visible regardless of zen state
+    // (chrome-hidden above is only ever set when fs is true), so there's
+    // nothing to reclaim space from by floating it - it should just sit
+    // in normal flow under #frame like it always did outside zen.
+    readerScreen.classList.toggle('fullscreen', fs);
+    clearTimeout(desktopChromeHideTimer);
+    fullscreenToggleBtn.classList.toggle('active', fs);
+    // Entering/exiting fullscreen changes the frame's available box
+    // (browser toolbar/tabs appearing or disappearing) even when
+    // window.innerWidth doesn't change - recompute the (still fixed,
+    // evenly-split) columns against the new box rather than leaving
+    // stale ones in place.
+    if (zenActive) {
+      recalcZenColumns();
+      if (shown && idx >= 0) showPage(idx);
+      updateZenImageForTime((audio.currentTime || 0) + chapterTimeOffset);
+    }
+  }
+  document.addEventListener('fullscreenchange', applyDesktopFullscreenChrome);
+
+  fullscreenToggleBtn.addEventListener('click', function(){
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen().catch(function(e){
+        console.log('requestFullscreen failed: ' + e);
+      });
+    }
+  });
+
+  // Moving the mouse into the bottom 20% OR top 10% of the viewport
+  // reveals chrome while fullscreen, with an inactivity timeout that
+  // hides it again - matches standard fullscreen-video-player
+  // conventions. The top zone also happens to be where the browser's own
+  // native "press Esc to exit fullscreen" affordance shows the mouse
+  // approaching - that's fine, nothing of ours renders there while
+  // chrome-hidden (the top icon row is part of the same hidden set), so
+  // there's no visual clash, just two independent hover reveals sharing
+  // the same screen edge.
+  var desktopChromeHideTimer = null;
+  var DESKTOP_CHROME_HOVER_ZONE = 0.8; // bottom 20% of viewport height
+  var DESKTOP_CHROME_TOP_ZONE = 0.1; // top 10% of viewport height
+  var DESKTOP_CHROME_HIDE_DELAY = 2500;
+
+  document.addEventListener('mousemove', function(e){
+    if (zenCoarsePointerMql.matches) return;
+    if (!document.fullscreenElement) return;
+    var inBottomZone = e.clientY >= window.innerHeight * DESKTOP_CHROME_HOVER_ZONE;
+    var inTopZone = e.clientY <= window.innerHeight * DESKTOP_CHROME_TOP_ZONE;
+    if (!inBottomZone && !inTopZone) return;
+    readerScreen.classList.remove('chrome-hidden');
+    clearTimeout(desktopChromeHideTimer);
+    desktopChromeHideTimer = setTimeout(function(){
+      readerScreen.classList.add('chrome-hidden');
+    }, DESKTOP_CHROME_HIDE_DELAY);
+  });
+
+  // Resolves the ordered side-image list for the chapter just opened -
+  // see MainActivity.resolveChapterImagesJson() for the actual
+  // backward-search/rotation-set logic; this just fetches and stores the
+  // result. An empty list means "no images from chapter 1 up to this one"
+  // - updateZenImageForTime() falls back to the existing ID3 cover art
+  // in that case, same image already shown in the normal (non-zen) UI.
+  async function loadZenImagesForChapter(base){
+    zenImageList = [];
+    zenCurrentImageUrl = null;
+    try {
+      var res = JSON.parse((await Android.resolveChapterImages(base)) || '{}');
+      (res.images || []).forEach(function(name){
+        zenImageList.push(window.chapterImageUrl(name));
+      });
+    } catch(e){}
+  }
+
+  // A chapter's own N images divide its duration into N equal segments,
+  // switching evenly - a 1-image list (the "earlier chapter, static"
+  // case from the resolution algorithm) naturally never changes segment,
+  // so no special-casing is needed for it beyond the fully-empty case.
+  function updateZenImageForTime(t){
+    var url = null;
+    if (zenImageList.length === 0) {
+      url = (coverArt.style.display !== 'none' && coverArt.src) ? coverArt.src : null;
+    } else if (zenImageList.length === 1) {
+      url = zenImageList[0];
+    } else {
+      var frac = chapterDuration > 0 ? Math.min(0.999999, t / chapterDuration) : 0;
+      var segment = Math.max(0, Math.min(zenImageList.length - 1, Math.floor(frac * zenImageList.length)));
+      url = zenImageList[segment];
+    }
+    if (url && url !== zenCurrentImageUrl) {
+      zenCurrentImageUrl = url;
+      zenImage.src = url;
+    }
+    var shouldShow = zenActive && !!url;
+    if (shouldShow !== (zenImageWrap.style.display === 'flex')) {
+      zenImageWrap.style.display = shouldShow ? 'flex' : 'none';
+      // The image's presence/absence changes how much width the text
+      // gets (see getAvailableSpace()) - re-fit the current page against it.
+      if (shown && idx >= 0) showPage(idx);
+    }
+  }
+
+  // Recolors characters left-to-right as the chunk's own playback
+  // progresses, so "10% through this chunk" reads as "10% of its
+  // characters have turned" rather than a single continuous gradient -
+  // matches how furigana/karaoke-style highlighting is usually done. The
+  // first PRELIT_COUNT characters are lit immediately by showPage() above;
+  // progress here is mapped over the remaining characters only, and
+  // rescaled so the last character lands at COMPLETE_AT_FRACTION rather
+  // than exactly 100% - audio for a chunk tends to actually finish a beat
+  // before the chunk's own end timestamp, so waiting for true 100% often
+  // meant the last couple of characters never visibly caught up.
+  // Theme-dependent - see updateThemeColors()/applyTheme() below, which
+  // read these from the --read-text-highlight-a/--read-text-b CSS
+  // custom properties instead of hardcoding one literal color each, so
+  // the light/dark theme toggle can change them without a page reload.
+  var HIGHLIGHT_COLOR, FADE_BASE_COLOR;
+  var PRELIT_COUNT = 2;
+  var COMPLETE_AT_FRACTION = 0.95;
+
+  // 'A' = color sweep (discrete per-character flip, the original/default
+  // behavior above); 'B' = fade reveal (opacity ramps continuously per
+  // character instead of the color ever changing). Global app setting,
+  // not scoped per book - read once at launch, written on every toggle.
+  var textPreset = 'A';
+  try { textPreset = Android.getTextPreset() || 'A'; } catch(e){}
+
+  // Sets each span's starting look for whichever preset is currently
+  // active - called once per fresh chunk (showPage) and again immediately
+  // on a mid-chunk preset toggle (setTextPreset below).
+  function applyInitialSpanState(){
+    var i;
+    if (textPreset === 'B') {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.color = FADE_BASE_COLOR;
+        chunkSpans[i].style.opacity = (i < PRELIT_COUNT) ? '1' : '0';
+      }
+    } else {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.opacity = '';
+        chunkSpans[i].style.color = (i < chunkLitCount) ? HIGHLIGHT_COLOR : '';
+      }
+    }
+  }
+
+  function updateChunkHighlight(t, chunk){
+    if (!shown || chunkSpans.length === 0) return;
+    var span = chunk.end - chunk.start;
+    var frac = span > 0 ? (t - chunk.start) / span : 1;
+    frac = Math.max(0, Math.min(1, frac));
+    var adjustedFrac = Math.min(1, frac / COMPLETE_AT_FRACTION);
+    var remaining = Math.max(0, chunkSpans.length - PRELIT_COUNT);
+
+    if (textPreset === 'B') {
+      var continuous = adjustedFrac * remaining;
+      for (var i = 0; i < remaining; i++) {
+        chunkSpans[PRELIT_COUNT + i].style.opacity = Math.max(0, Math.min(1, continuous - i));
+      }
+      return;
+    }
+
+    var litCount = Math.min(chunkSpans.length, PRELIT_COUNT + Math.floor(adjustedFrac * remaining));
+    if (litCount === chunkLitCount) return;
+    var j;
+    if (litCount > chunkLitCount) {
+      for (j = chunkLitCount; j < litCount; j++) chunkSpans[j].style.color = HIGHLIGHT_COLOR;
+    } else {
+      for (j = litCount; j < chunkLitCount; j++) chunkSpans[j].style.color = '';
+    }
+    chunkLitCount = litCount;
+  }
+
+  function setTextPreset(preset){
+    if (preset !== 'A' && preset !== 'B') return;
+    textPreset = preset;
+    try { Android.setTextPreset(preset); } catch(e){}
+    presetToggleBtn.classList.toggle('active', preset === 'B');
+    if (shown && chunkSpans.length) {
+      applyInitialSpanState();
+      updateChunkHighlight((audio.currentTime || 0) + chapterTimeOffset, chunks[idx]);
+    }
+  }
+
+  presetToggleBtn.classList.toggle('active', textPreset === 'B');
+  presetToggleBtn.addEventListener('click', function(){
+    setTextPreset(textPreset === 'A' ? 'B' : 'A');
+  });
+
+  // Light/dark theme - global setting (not per-book), same persistence
+  // pattern as textPreset above. Only --bg/--ink are literally specified
+  // by the request; every other CSS variable is derived to stay
+  // consistent, and is easy to retune independently later.
+  function updateThemeColors(){
+    var cs = getComputedStyle(document.documentElement);
+    HIGHLIGHT_COLOR = cs.getPropertyValue('--read-text-highlight-a').trim();
+    FADE_BASE_COLOR = cs.getPropertyValue('--read-text-b').trim();
+  }
+
+  var theme = 'dark';
+  try { theme = localStorage.getItem('theme') || 'dark'; } catch(e){}
+
+  function applyTheme(){
+    document.documentElement.classList.toggle('light', theme === 'light');
+    updateThemeColors();
+    // Re-render the current chunk's colors immediately, same as
+    // setTextPreset does above, rather than waiting for the next chunk.
+    if (shown && chunkSpans.length) {
+      applyInitialSpanState();
+      updateChunkHighlight((audio.currentTime || 0) + chapterTimeOffset, chunks[idx]);
+    }
+  }
+
+  applyTheme();
+  themeToggleBtn.addEventListener('click', function(){
+    theme = theme === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('theme', theme); } catch(e){}
+    applyTheme();
+  });
+
+  function currentChunkIndex(t){
+    var i = 0;
+    for(var k = 0; k < chunks.length; k++){
+      if(chunks[k].start <= t) i = k; else break;
+    }
+    return i;
+  }
+
+  function renderTimeUI(t){
+    elapsedLabel.textContent = formatTime(t);
+    var pct = chapterDuration > 0 ? Math.max(0, Math.min(100, (t / chapterDuration) * 100)) : 0;
+    progressFill.style.width = pct + '%';
+    progressMarker.style.left = pct + '%';
+  }
+
+  function updateForTime(t){
+    if (scrubbing) return; // don't fight the user's drag
+    renderTimeUI(t);
+
+    if(chunks.length === 0) return;
+    var newIdx = currentChunkIndex(t);
+    var chunk = chunks[newIdx];
+    var active = t >= chunk.start && t < chunk.end;
+
+    if(newIdx !== idx || active !== shown){
+      idx = newIdx;
+      shown = active;
+      if(shown){
+        showPage(idx);
+      } else {
+        blankPage();
+      }
+      updateChapterPill();
+    }
+
+    updateChunkHighlight(t, chunk);
+    updateZenImageForTime(t);
+  }
+
+  function bufferedRangesString(){
+    var s = '';
+    for (var i = 0; i < audio.buffered.length; i++){
+      s += '[' + audio.buffered.start(i).toFixed(2) + '-' + audio.buffered.end(i).toFixed(2) + ']';
+    }
+    return s || '(none)';
+  }
+
+  ['waiting','stalled','suspend','canplay','loadeddata','loadedmetadata','seeking','seeked','emptied','abort'].forEach(function(evt){
+    audio.addEventListener(evt, function(){
+      console.log('AUDIO ' + evt + ' t=' + audio.currentTime.toFixed(2) + ' readyState=' + audio.readyState + ' networkState=' + audio.networkState + ' buffered=' + bufferedRangesString());
+    });
+  });
+
+  audio.addEventListener('error', function(){
+    var err = audio.error;
+    console.log('AUDIO ERROR code=' + (err ? err.code : 'null') + ' message=' + (err ? err.message : '(none)') + ' t=' + audio.currentTime.toFixed(2));
+  });
+
+  // Total chapter duration is only trustworthy from the very first,
+  // untrimmed full-file load - a byte-offset "jump" resource (see
+  // seekToTime) reports its own remaining length as .duration, which would
+  // otherwise keep shrinking the total time shown after every seek.
+  audio.addEventListener('durationchange', function(){
+    if (!durationKnown && isFinite(audio.duration) && audio.duration > 0) {
+      chapterDuration = audio.duration;
+      durationKnown = true;
+      totalLabel.textContent = formatTime(chapterDuration);
+    }
+  });
+
+  // Mirrors <audio>'s state into the native MediaSession that drives the
+  // lock-screen/notification controls (see PlaybackService.kt) - forced
+  // (bypassing the throttle) on play/pause/speed changes so those feel
+  // immediate, throttled to once per second of media time on ordinary
+  // timeupdate ticks since the system interpolates the seekbar between
+  // updates on its own using the reported speed.
+  var lastReportedSecond = -1;
+  function reportPlaybackState(force){
+    var t = (audio.currentTime || 0) + chapterTimeOffset;
+    var sec = Math.floor(t);
+    if (!force && sec === lastReportedSecond) return;
+    lastReportedSecond = sec;
+    Android.reportPlaybackState(!audio.paused, t, chapterDuration, currentSpeed, pendingChapterBase);
+  }
+
+  function updatePlayPauseIcon(){
+    playIcon.style.display = audio.paused ? '' : 'none';
+    pauseIcon.style.display = audio.paused ? 'none' : '';
+    playPauseBtn.setAttribute('aria-label', audio.paused ? 'Play' : 'Pause');
+  }
+
+  audio.addEventListener('play', function(){ reportPlaybackState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); acquireWakeLock(); });
+  audio.addEventListener('pause', function(){ reportPlaybackState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); releaseWakeLock(); });
+
+  // --- Screen Wake Lock: keeps the device screen from sleeping during
+  // playback, matching the Android app's own screen-on behavior while a
+  // chapter is playing (there's no browser equivalent of a foreground
+  // service holding a wake lock - this API is the closest platform
+  // match). Feature-detected since support varies (iOS Safari 16.4+,
+  // most modern Android/desktop browsers) - silently does nothing where
+  // unavailable rather than breaking playback.
+  var wakeLock = null;
+
+  async function acquireWakeLock(){
+    if (!('wakeLock' in navigator) || wakeLock) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', function(){ wakeLock = null; });
+    } catch (e) {
+      // Common, harmless causes: tab not visible yet, battery saver,
+      // permissions policy - the screen just sleeps normally instead.
+      console.log('wakeLock request failed: ' + e);
+    }
+  }
+  function releaseWakeLock(){
+    if (!wakeLock) return;
+    wakeLock.release().catch(function(){});
+    wakeLock = null;
+  }
+  // The lock is auto-released by the browser whenever the tab is
+  // hidden/backgrounded (per spec) - reacquire it once the tab is
+  // visible again if audio is still playing, so switching back from
+  // another app mid-chapter restores the same screen-stays-on behavior
+  // instead of silently losing it for the rest of the session.
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible' && !audio.paused) acquireWakeLock();
+  });
+
+  audio.addEventListener('timeupdate', function(){
+    var t = audio.currentTime;
+    if (isNaN(t)) {
+      console.log('AUDIO timeupdate: currentTime is NaN, ignoring');
+      return;
+    }
+    updateForTime(t + chapterTimeOffset);
+    reportPlaybackState(false);
+  });
+
+  // Continuous playback: 'ended' fires once the currently loaded resource
+  // reaches its own end. Every resource we ever load - the initial full
+  // file, or a seekToTime() byte-offset fragment - always runs through to
+  // the file's real EOF (see serveAudioFromTime), so this reliably means
+  // "the chapter has actually finished," regardless of how many seeks
+  // happened along the way.
+  audio.addEventListener('ended', function(){
+    var currentIndex = allChapters.indexOf(pendingChapterBase);
+    if (currentIndex >= 0 && currentIndex + 1 < allChapters.length) {
+      openChapter(allChapters[currentIndex + 1]);
+    }
+  });
+
+  function togglePlayPause(){
+    if(audio.paused) audio.play(); else audio.pause();
+  }
+
+  // A tiny forward nudge past the exact chunk boundary, same reasoning as
+  // before: landing a hair before the intended start (rounding/frame
+  // snapping) reads as still-the-previous-chunk or as silence.
+  var SEEK_EPSILON = 0.05;
+
+  // Unlike the Android app (whose SAF+WebView combination couldn't
+  // reposition an already-loaded <audio> resource reliably, hence that
+  // app's virtual-byte-offset "fake seek" - see the Android asset's own
+  // index.html for that history), a real Range-serving HTTP file server
+  // needs none of that: plain currentTime assignment against this
+  // server's /audio endpoint seeks correctly on its own (confirmed via
+  // the Phase 2 Range-serving verification), so chapterTimeOffset simply
+  // never needs to move away from 0 in this build.
+  function seekToTime(targetTime){
+    if (chapterDuration > 0) targetTime = Math.max(0, Math.min(targetTime, chapterDuration));
+    else targetTime = Math.max(0, targetTime);
+    var wasPlaying = !audio.paused;
+    audio.currentTime = targetTime;
+    if (wasPlaying) audio.play();
+    updateForTime(targetTime);
+  }
+
+  function seekToChunk(target){
+    target = Math.max(0, Math.min(chunks.length - 1, target));
+    seekToTime(chunks[target].start + SEEK_EPSILON);
+  }
+
+  function goNext(){ if (chunks.length) seekToChunk(idx + 1); }
+  function goPrev(){ if (chunks.length) seekToChunk(Math.max(0, idx - 1)); }
+
+  // Player-controls row - reuses the exact same actions as the existing
+  // edge-swipe gestures (goPrev/goNext) and triple-tap-adjacent transport
+  // functions, just as visible buttons.
+  // Matches common media-player "previous track" semantics: a single press
+  // restarts the current chapter (seek to 0) rather than jumping back -
+  // only a second press within PREV_CHAPTER_DOUBLE_MS actually navigates
+  // to the previous chapter. Same behavior/timing as remote.html's own
+  // prevChapterBtn.
+  var PREV_CHAPTER_DOUBLE_MS = 1500;
+  var lastPrevChapterClick = 0;
+  prevChapterBtn.addEventListener('click', function(){
+    var now = Date.now();
+    if (now - lastPrevChapterClick < PREV_CHAPTER_DOUBLE_MS) {
+      lastPrevChapterClick = 0;
+      goPrevChapter();
+    } else {
+      lastPrevChapterClick = now;
+      seekToTime(0);
+    }
+  });
+  prevPartBtn.addEventListener('click', goPrev);
+  playPauseBtn.addEventListener('click', togglePlayPause);
+  nextPartBtn.addEventListener('click', goNext);
+  nextChapterBtn.addEventListener('click', goNextChapter);
+
+  // Entry points for transport actions arriving from outside the WebView -
+  // the lock-screen widget, the notification, Bluetooth headset buttons,
+  // Android Auto - relayed here from PlaybackService via MainActivity's
+  // TransportListener (see runJs() in MainActivity.kt).
+  window.mediaPlay = function(){ audio.play().catch(function(e){ console.log('mediaPlay failed: ' + e); }); };
+  window.mediaPause = function(){ audio.pause(); };
+  window.mediaNext = function(){ goNext(); };
+  window.mediaPrevious = function(){ goPrev(); };
+  window.mediaSeekTo = function(seconds){ seekToTime(seconds); };
+
+  // --- Gestures on the text area: single tap to reveal chrome,
+  // double-tap to play/pause, triple-tap to go back to the library,
+  // edge-swipe to prev/next. All funneled through Pointer Events so
+  // mouse (desktop, any width, fullscreen or not) and touch behave the
+  // same - single tap = reveal, double tap = play/pause applies
+  // uniformly everywhere, not just touch devices.
+  //
+  // Single tap used to double as play/pause, which real use showed up
+  // as an inconvenience: revealing the interface on a touch device
+  // meant also pausing playback just to look at it. Moved play/pause to
+  // double-tap so the two are independent - a single tap now only ever
+  // reveals chrome (see toggleChromeFromTap() below), never touches
+  // playback.
+  var EDGE_ZONE = 32;
+  var SWIPE_MIN_DX = 48;
+  var TAP_MAX_MOVE = 12;
+  var TAP_GAP_MS = 300;
+  // Deliberately a bit harder to trigger than a page-turn swipe, since it
+  // has a lasting effect (creates a bookmark) rather than just moving a
+  // page forward/back.
+  var VSWIPE_MIN_DY = 64;
+
+  var pointerStart = null;
+  var tapCount = 0;
+  var tapTimer = null;
+
+  function registerTap(){
+    tapCount++;
+    if (tapTimer) clearTimeout(tapTimer);
+    tapTimer = setTimeout(function(){
+      if (tapCount === 1) {
+        toggleChromeFromTap();
+      } else if (tapCount === 2) {
+        togglePlayPause();
+      } else if (tapCount >= 3) {
+        goToLibrary();
+      }
+      tapCount = 0;
+    }, TAP_GAP_MS);
+  }
+
+  // Single-tap chrome reveal - only meaningful where chrome can actually
+  // be hidden in the first place: mobile/tablet zen (any state, coarse
+  // pointer) or desktop while genuinely fullscreen (fine pointer). A tap
+  // elsewhere (plain reading mode, or desktop zen in a normal window) is
+  // a harmless no-op, since chrome is already always visible there.
+  // Toggles rather than only ever showing, so a second tap can dismiss
+  // it again without needing to reach for the mouse/hover zone - on
+  // desktop this shares the exact same auto-hide timer as the existing
+  // hover-to-reveal, so a tap-triggered reveal behaves identically
+  // (hides itself again after DESKTOP_CHROME_HIDE_DELAY of inactivity)
+  // rather than needing a second explicit tap to dismiss.
+  function toggleChromeFromTap(){
+    if (zenCoarsePointerMql.matches) {
+      if (!zenActive) return;
+      readerScreen.classList.toggle('chrome-hidden');
+    } else {
+      if (!document.fullscreenElement) return;
+      readerScreen.classList.toggle('chrome-hidden');
+      clearTimeout(desktopChromeHideTimer);
+      if (readerScreen.classList.contains('chrome-hidden')) return;
+      desktopChromeHideTimer = setTimeout(function(){
+        readerScreen.classList.add('chrome-hidden');
+      }, DESKTOP_CHROME_HIDE_DELAY);
+    }
+  }
+
+  frame.addEventListener('pointerdown', function(e){
+    pointerStart = { x: e.clientX, y: e.clientY };
+  });
+
+  frame.addEventListener('pointerup', function(e){
+    if (!pointerStart) return;
+    var dx = e.clientX - pointerStart.x;
+    var dy = e.clientY - pointerStart.y;
+    var rect = frame.getBoundingClientRect();
+    var startedNearLeft = (pointerStart.x - rect.left) <= EDGE_ZONE;
+    var startedNearRight = (rect.right - pointerStart.x) <= EDGE_ZONE;
+    var horizontal = Math.abs(dx) > Math.abs(dy);
+    pointerStart = null;
+
+    if (horizontal && dx >= SWIPE_MIN_DX && startedNearLeft) {
+      goNext();
+    } else if (horizontal && -dx >= SWIPE_MIN_DX && startedNearRight) {
+      goPrev();
+    } else if (!horizontal && -dy >= VSWIPE_MIN_DY) {
+      saveBookmarkGesture();
+    } else if (Math.abs(dx) < TAP_MAX_MOVE && Math.abs(dy) < TAP_MAX_MOVE) {
+      registerTap();
+    }
+  });
+
+  // Swipe up (anywhere on the text area, not edge-gated) to bookmark the
+  // current chapter+time. Auto-labeled by date/time on the native side
+  // (MainActivity.saveBookmarkRecord) - see the library screen's
+  // Bookmarks section for viewing/deleting them.
+  async function saveBookmarkGesture(){
+    if (!pendingChapterBase) return;
+    var t = (audio.currentTime || 0) + chapterTimeOffset;
+    var json;
+    try { json = JSON.parse(await Android.saveBookmark(pendingChapterBase, t)); } catch(e){ json = null; }
+    if (json && !json.error) {
+      showBookmarkToast(json.label);
+    }
+  }
+
+  var bookmarkToastTimer = null;
+  function showBookmarkToast(text){
+    bookmarkToast.textContent = text;
+    bookmarkToast.classList.add('show');
+    if (bookmarkToastTimer) clearTimeout(bookmarkToastTimer);
+    bookmarkToastTimer = setTimeout(function(){ bookmarkToast.classList.remove('show'); }, 1600);
+  }
+
+  // --- Drag-to-seek on the progress track.
+  function scrubTargetFromEvent(e){
+    var rect = progressTrack.getBoundingClientRect();
+    var frac = (e.clientX - rect.left) / rect.width;
+    frac = Math.max(0, Math.min(1, frac));
+    return frac * (chapterDuration || 0);
+  }
+
+  progressTrack.addEventListener('pointerdown', function(e){
+    scrubbing = true;
+    try { progressTrack.setPointerCapture(e.pointerId); } catch(err){}
+    renderTimeUI(scrubTargetFromEvent(e));
+  });
+  progressTrack.addEventListener('pointermove', function(e){
+    if (scrubbing) renderTimeUI(scrubTargetFromEvent(e));
+  });
+  progressTrack.addEventListener('pointerup', function(e){
+    if (!scrubbing) return;
+    scrubbing = false;
+    seekToTime(scrubTargetFromEvent(e));
+  });
+
+  // --- Speed control overlay.
+  function setSpeed(v){
+    if (!isFinite(v)) return;
+    v = Math.max(0.25, Math.min(8, Math.round(v * 100) / 100));
+    currentSpeed = v;
+    audio.playbackRate = v;
+    speedLabel.textContent = v.toFixed(2) + 'x';
+    speedValue.textContent = v.toFixed(2) + 'x';
+    speedSlider.value = v;
+    reportPlaybackState(true);
+  }
+
+  // Visible second entry point for the same two actions the existing
+  // gestures already do (triple-tap / swipe-up) - matches the Windows
+  // sibling app's icon row. Gestures keep working unchanged.
+  libraryBtn.addEventListener('click', goToLibrary);
+  bookmarkBtn.addEventListener('click', saveBookmarkGesture);
+
+  speedPill.addEventListener('click', function(){
+    speedOverlay.style.display = (speedOverlay.style.display === 'flex') ? 'none' : 'flex';
+  });
+  speedOverlay.addEventListener('click', function(e){
+    if (e.target === speedOverlay) speedOverlay.style.display = 'none';
+  });
+  speedDown.addEventListener('click', function(){ setSpeed(currentSpeed - 0.01); });
+  speedUp.addEventListener('click', function(){ setSpeed(currentSpeed + 0.01); });
+  speedSlider.addEventListener('input', function(){ setSpeed(parseFloat(speedSlider.value)); });
+  Array.prototype.forEach.call(document.querySelectorAll('#speedPresets button'), function(btn){
+    btn.addEventListener('click', function(){ setSpeed(parseFloat(btn.getAttribute('data-speed'))); });
+  });
+
+  // --- Volume control: clicking #volumeToggleBtn opens a stack of four
+  // pills below it (+ / level / - / mute), all plain default-styled
+  // .iconBtn pills - closing is only ever done by clicking the volume
+  // icon again (not click-outside, not tab-hidden - unlike the discarded
+  // capsule design, this one's explicitly icon-toggled both ways), or
+  // immediately by the mute button itself (see below). Level is an
+  // integer 0-100 in steps of 5; holding + or - repeats (an initial
+  // delay before the first repeat, then a faster steady interval).
+  var VOLUME_STEP = 5;
+  var volumeLevel = Math.round((audio.volume || 1) * 100 / VOLUME_STEP) * VOLUME_STEP;
+  var muted = false;
+  var volumeBeforeMute = volumeLevel;
+
+  function renderVolumeLevel(){
+    volumeLevelPill.textContent = volumeLevel;
+    audio.volume = volumeLevel / 100;
+  }
+  renderVolumeLevel(); // audio.volume defaults to 1 - sync the pill up front
+
+  function setVolumeLevel(v){
+    volumeLevel = Math.max(0, Math.min(100, v));
+    renderVolumeLevel();
+  }
+
+  function setMuted(v){
+    muted = v;
+    volumeIconNormal.style.display = muted ? 'none' : '';
+    volumeIconMuted.style.display = muted ? '' : 'none';
+  }
+
+  volumeToggleBtn.addEventListener('click', function(e){
+    e.stopPropagation();
+    volumePopup.classList.toggle('show');
+  });
+
+  var VOLUME_REPEAT_DELAY = 400;
+  var VOLUME_REPEAT_INTERVAL = 120;
+  var volumeRepeatTimer = null;
+
+  function startVolumeRepeat(step){
+    // Raising volume while muted is a second, implicit way to unmute
+    // (besides the mute button itself) - continues from 0 rather than
+    // restoring volumeBeforeMute, per the "+ increases from 0 to 5"
+    // request. Only relevant for the "+" direction; "-" while muted just
+    // clamps at 0 same as always, no special-casing needed there.
+    if (step > 0 && muted) setMuted(false);
+    setVolumeLevel(volumeLevel + step);
+    volumeRepeatTimer = setTimeout(function repeat(){
+      setVolumeLevel(volumeLevel + step);
+      volumeRepeatTimer = setTimeout(repeat, VOLUME_REPEAT_INTERVAL);
+    }, VOLUME_REPEAT_DELAY);
+  }
+  function stopVolumeRepeat(){
+    clearTimeout(volumeRepeatTimer);
+    volumeRepeatTimer = null;
+  }
+  volumeUpBtn.addEventListener('pointerdown', function(e){ e.preventDefault(); startVolumeRepeat(VOLUME_STEP); });
+  volumeDownBtn.addEventListener('pointerdown', function(e){ e.preventDefault(); startVolumeRepeat(-VOLUME_STEP); });
+  // On window, not the buttons themselves, so releasing after the
+  // pointer has dragged off the button (still held) reliably stops it.
+  window.addEventListener('pointerup', stopVolumeRepeat);
+  window.addEventListener('pointercancel', stopVolumeRepeat);
+
+  // Mute toggle: saves the current level before muting (so unmuting via
+  // this same button restores it), always closes the whole popup
+  // immediately regardless of which direction it just toggled - matches
+  // the request that clicking mute "immediately hides" all four pills,
+  // not just the other three.
+  muteBtn.addEventListener('click', function(e){
+    e.stopPropagation();
+    if (muted) {
+      setMuted(false);
+      setVolumeLevel(volumeBeforeMute);
+    } else {
+      volumeBeforeMute = volumeLevel;
+      setMuted(true);
+      setVolumeLevel(0);
+    }
+    volumePopup.classList.remove('show');
+  });
+
+  // --- Sync: this page is a "player" in the same sense tv-player.html is -
+  // it registers with the shared WebSocket control-plane (server/src/sync.js)
+  // so remote.html (or another Player-mode tab) can pick it as a target and
+  // drive it remotely, and so opening a chapter here automatically takes
+  // over as "the" active device (deactivating whatever was playing
+  // elsewhere) rather than silently running alongside it.
+  var deactivatedScreen = document.getElementById('deactivatedScreen');
+
+  var playerDeviceId;
+  try {
+    playerDeviceId = localStorage.getItem('playerDeviceId');
+    if (!playerDeviceId) { playerDeviceId = crypto.randomUUID(); localStorage.setItem('playerDeviceId', playerDeviceId); }
+  } catch (e) { playerDeviceId = 'player-' + Math.random().toString(36).slice(2); }
+
+  var playerDeviceKind = matchMedia('(pointer: coarse)').matches
+    ? (window.innerWidth < 768 ? 'phone' : 'tablet') : 'desktop';
+  var playerDeviceName = (new URLSearchParams(location.search).get('name')) ||
+    ('Player (' + playerDeviceKind.charAt(0).toUpperCase() + playerDeviceKind.slice(1) + ')');
+
+  var ws = null;
+  function wsSend(payload){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  }
+
+  // Routes a library selection (continue/chapter/bookmark) through the
+  // shared sync server instead of calling openChapter() directly, so the
+  // "deactivate everyone else" side effect (see sync.js) happens for free -
+  // the server echoes the load back to us, and the WS message handler
+  // below is what actually calls openChapter(). Falls back to opening
+  // locally if the socket isn't connected for some reason, so the app
+  // still works standalone rather than silently doing nothing.
+  function sendSelfLoad(bookId, chapterBase, resumeSeconds){
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      wsSend({ type: 'command', action: 'load', targetDeviceId: playerDeviceId, bookId: bookId, chapterBase: chapterBase, positionSeconds: resumeSeconds || 0 });
+    } else {
+      openChapter(chapterBase, resumeSeconds);
+    }
+  }
+
+  function showDeactivatedScreen(){
+    audio.pause();
+    homeScreen.style.display = 'none';
+    libraryScreen.style.display = 'none';
+    readerScreen.style.display = 'none';
+    deactivatedScreen.style.display = 'flex';
+  }
+
+  function handleSyncCommand(msg){
+    switch (msg.action) {
+      case 'load':
+        deactivatedScreen.style.display = 'none';
+        var currentBookId = null;
+        try { currentBookId = localStorage.getItem('selectedBookId'); } catch (e) {}
+        if (msg.bookId && msg.bookId !== currentBookId) Android.selectBook(msg.bookId);
+        openChapter(msg.chapterBase, msg.positionSeconds || 0);
+        break;
+      case 'deactivate':
+        showDeactivatedScreen();
+        break;
+      case 'playPause': togglePlayPause(); break;
+      case 'seek': seekToTime(msg.value || 0); break;
+      case 'next': goNext(); break;
+      case 'prev': goPrev(); break;
+      case 'nextChapter': goNextChapter(); break;
+      case 'prevChapter': goPrevChapter(); break;
+      case 'setPreset': setTextPreset(msg.value); break;
+      case 'setTheme':
+        if ((msg.value === 'light' || msg.value === 'dark') && msg.value !== theme) themeToggleBtn.click();
+        break;
+      case 'setVolume': setVolumeLevel(Math.round((msg.value || 0) * 100)); break;
+    }
+  }
+
+  // Piggybacks on reportPlaybackState()'s existing ~1/sec throttle rather
+  // than adding a second independent timer - same cadence, same call
+  // sites (play/pause/timeupdate), just also relaying to the sync server
+  // whenever a report actually goes out.
+  var _reportPlaybackState = reportPlaybackState;
+  reportPlaybackState = function(force){
+    _reportPlaybackState(force);
+    var bookId = null;
+    try { bookId = localStorage.getItem('selectedBookId'); } catch (e) {}
+    wsSend({
+      type: 'state',
+      bookId: bookId, chapterBase: pendingChapterBase,
+      position: (audio.currentTime || 0) + chapterTimeOffset, duration: chapterDuration,
+      paused: audio.paused,
+      preset: textPreset, theme: theme,
+      chapterIndex: allChapters.indexOf(pendingChapterBase) + 1, totalChapters: allChapters.length,
+      partIndex: idx + 1, totalParts: chunks.length
+    });
+  };
+
+  function connectSync(){
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.addEventListener('open', function(){
+      wsSend({ type: 'hello', role: 'player', deviceId: playerDeviceId, deviceName: playerDeviceName, deviceKind: playerDeviceKind });
+    });
+    ws.addEventListener('message', function(ev){
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'command') handleSyncCommand(msg);
+    });
+    ws.addEventListener('close', function(){ setTimeout(connectSync, 2000); });
+    ws.addEventListener('error', function(){ try { ws.close(); } catch (e) {} });
+  }
+  connectSync();
+
+  renderHome();
+  fitHomeHeader();
+  // The initial fit above can run before the Roboto webfont (loaded async
+  // via the <link> in <head>) finishes swapping in - re-measuring once
+  // fonts.ready resolves corrects any drift from fitting against Arial's
+  // (the fallback's) slightly different metrics in the meantime.
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitHomeHeader);
+})();
+</script>
+</body>
+</html>

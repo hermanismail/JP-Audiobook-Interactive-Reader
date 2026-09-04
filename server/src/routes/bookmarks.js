@@ -26,8 +26,10 @@ router.get('/books/:bookId/bookmarks-and-last-position', (req, res) => {
   if (!bookPath) return;
   const { bookId } = req.params;
 
+  // "Continue" pill: whichever chapter was most recently active in this
+  // book, same shape as before this endpoint tracked per-chapter progress.
   const lastPositionRow = db
-    .prepare('SELECT chapter_base, position_seconds, updated_at FROM last_position WHERE book_id = ?')
+    .prepare('SELECT chapter_base, position_seconds, updated_at FROM chapter_progress WHERE book_id = ? ORDER BY updated_at DESC LIMIT 1')
     .get(bookId);
   const lastPosition = lastPositionRow
     ? {
@@ -36,6 +38,17 @@ router.get('/books/:bookId/bookmarks-and-last-position', (req, res) => {
         updatedAt: lastPositionRow.updated_at,
       }
     : null;
+
+  // Per-chapter progress map (chapterBase -> positionSeconds) - lets every
+  // chapter pill resume where it was left off, not just the single most-
+  // recently-active one.
+  const progressRows = db
+    .prepare('SELECT chapter_base, position_seconds FROM chapter_progress WHERE book_id = ?')
+    .all(bookId);
+  const chapterProgress = {};
+  progressRows.forEach((row) => {
+    chapterProgress[row.chapter_base] = row.position_seconds;
+  });
 
   const bookmarkRows = db
     .prepare('SELECT id, chapter_base, position_seconds, label, created_at FROM bookmarks WHERE book_id = ? ORDER BY created_at ASC')
@@ -48,7 +61,26 @@ router.get('/books/:bookId/bookmarks-and-last-position', (req, res) => {
     createdAt: row.created_at,
   }));
 
-  res.json({ lastPosition, bookmarks });
+  res.json({ lastPosition, chapterProgress, bookmarks });
+});
+
+// Single-chapter lookup - used by player.html when it opens a chapter
+// without an explicit resume time of its own (clicking next/prev chapter,
+// or auto-advancing into the next chapter on 'ended'), so those paths can
+// resume from that specific chapter's own last-played spot instead of
+// always restarting at 0.
+router.get('/books/:bookId/chapters/:chapterBase/progress', (req, res) => {
+  const bookPath = requireBook(req, res);
+  if (!bookPath) return;
+  const { bookId } = req.params;
+  const chapterBase = resolveChapterBase(bookPath, req.params.chapterBase);
+  if (!chapterBase) {
+    return res.status(404).json({ error: `Unknown chapter "${req.params.chapterBase}"` });
+  }
+  const row = db
+    .prepare('SELECT position_seconds FROM chapter_progress WHERE book_id = ? AND chapter_base = ?')
+    .get(bookId, chapterBase);
+  res.json({ positionSeconds: row ? row.position_seconds : 0 });
 });
 
 router.post('/books/:bookId/bookmarks', express.json(), (req, res) => {
@@ -97,7 +129,7 @@ router.put('/books/:bookId/last-position', express.json(), (req, res) => {
   }
 
   db.prepare(
-    'INSERT OR REPLACE INTO last_position (book_id, chapter_base, position_seconds, updated_at) VALUES (?, ?, ?, ?)'
+    'INSERT OR REPLACE INTO chapter_progress (book_id, chapter_base, position_seconds, updated_at) VALUES (?, ?, ?, ?)'
   ).run(bookId, chapterBase, positionSeconds, Date.now());
 
   res.json({ ok: true });

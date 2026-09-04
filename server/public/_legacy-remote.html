@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SHAMA Remote</title>
+<!--
+  A derived copy of index.html's Home/Library screens plus a new 4-row
+  now-playing/control view - not a shared module, same duplication-over-
+  abstraction pattern this codebase already uses for bridge-shim.js and
+  the reveal-engine copies (cast-receiver.html, tv-player.html). Adapted,
+  not pixel-identical: this page is always a single centered column
+  (max-width, comfortable in portrait on phone/tablet, compact on a wide
+  desktop browser instead of spreading icons far apart), so pill/grid
+  sizing here is its own compact variant of the originals rather than a
+  literal copy of their fixed 400x400 dimensions.
+
+  This page never plays audio itself - Home/Library selections send a
+  `load` command over the shared WebSocket (see server/src/sync.js) to a
+  target device (the TV, or any other connected player) instead of
+  opening a chapter locally. After sending `load` (or immediately, if a
+  device is already active when this page opens), the view switches to
+  the now-playing/control screen, which mirrors and drives whichever
+  device is currently active via `state`/`command` messages - the same
+  protocol tv-player.html speaks.
+-->
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0b0b0d; --ink:#e8e6ea; --panel-bg:#17161a; --panel-bg-2:#1c1a20;
+    --border:#3a3840; --muted:#9b93b0; --muted2:#9a97a0; --placeholder-ink:#4a4650;
+    --accent:#e08a3c; --progress-track:#2a2830;
+    --book-pill-ink:#d6d6d6;
+  }
+  :root.light {
+    --bg:#e5decf; --ink:#000000; --panel-bg:#ddd3bd; --panel-bg-2:#efe8d8;
+    --border:#b8ab8e; --muted:#7a6f58; --muted2:#8a7f68; --placeholder-ink:#a89a7d;
+    --accent:#e08a3c; --progress-track:#cfc3a8;
+    --book-pill-ink:#000000;
+  }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:"Roboto","Arial",sans-serif; }
+  /* 900px, not the narrower 480px this page started at - wide enough for
+     the two-column mode-pill row (and any future wide rows) to actually
+     "distribute evenly" instead of looking cramped, while still capped so
+     it doesn't stretch to the edges of a wide desktop browser. Text-heavy
+     single-column content (the chapter/bookmark list) stays narrow via
+     .narrowCol below rather than stretching to the full 900px itself. */
+  #app { max-width:900px; margin:0 auto; min-height:100%; box-sizing:border-box; padding:20px 16px; }
+  #app { display:flex; flex-direction:column; }
+  .screen { display:none; }
+  .screen.show { display:flex; flex-direction:column; }
+  .narrowCol { max-width:480px; width:100%; margin:0 auto; box-sizing:border-box; }
+
+  /* Carbon copy of index.html's home screen (title/subtitle/mode-row/book
+     grid) - same width-fitting behavior via fitHomeHeader() in the script,
+     same 800px/80vw breakpoint at 1080px, same no-fill pill styling. Only
+     the mode-row order/active pill differs (Remote first/orange here,
+     Player first/orange there) and the book-pill click behavior (sends a
+     `load` command here instead of opening a chapter locally) - see the
+     file-level comment at the top of this file. */
+  #homeScreen { padding:24px 0; box-sizing:border-box; }
+  #homeHeader {
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:24px 16px 0; text-align:center;
+  }
+  #homeTitle, #homeSubtitle { color:var(--ink); margin:0; }
+  .subtitleInitial { font-weight:700; color:var(--accent); }
+  #homeTitle, #homeSubtitle, #modeRow { width:800px; max-width:800px; box-sizing:border-box; }
+  @media (max-width:1080px) {
+    #homeTitle, #homeSubtitle, #modeRow { width:80vw; max-width:80vw; }
+  }
+  #homeTitle {
+    font-weight:700; letter-spacing:0.2em; white-space:nowrap; font-size:8rem; margin:0;
+    margin-right:-0.2em; /* cancels letter-spacing's trailing gap so the centered box's true center matches the glyphs' visual center */
+  }
+  #homeSubtitle { font-weight:300; white-space:nowrap; font-size:28px; text-transform:uppercase; }
+  @media (max-width:1080px) {
+    #homeSubtitle { display:none; }
+  }
+
+  #modeRow { display:flex; gap:14px; margin:0 auto; }
+  .modePill {
+    flex:1; display:flex; align-items:center; justify-content:center; gap:8px;
+    height:46px; box-sizing:border-box; border-radius:999px; border:1px solid var(--border);
+    color:var(--ink); text-decoration:none; font-size:16.8px; font-weight:600; text-transform:uppercase;
+  }
+  .modePill.current { border-color:var(--accent); color:var(--accent); }
+  /* 1em, not a hardcoded px size (overriding the SVGs' own width/height
+     attributes) - scales automatically with .modePill's own font-size. */
+  .modePill svg { flex-shrink:0; width:1em; height:1em; }
+
+  /* Breaks out of #app's 900px cap (unlike every other screen, which stays
+     inside it on purpose) - #app's own content width, after padding, isn't
+     even enough for two 400px pills + gap side by side, and index.html's
+     home grid isn't width-capped at all. width:100vw + this margin trick
+     makes the grid span the full viewport, centered independently of #app,
+     while #homeHeader/#modeRow (already their own explicit 800px/80vw,
+     both under 900px) stay exactly where they were. */
+  #homeGrid {
+    display:flex; flex-wrap:wrap; justify-content:center; align-items:flex-start; gap:50px; padding:36px 16px; box-sizing:border-box;
+    width:100vw; margin-left:calc(50% - 50vw);
+  }
+  .bookPill {
+    width:400px; height:400px; box-sizing:border-box; border:2px solid var(--muted2); border-radius:28px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:8px; padding:16px; cursor:pointer;
+  }
+  .bookPill.current { border-color:var(--accent); }
+  .bookCover, .bookCoverPlaceholder {
+    width:300px; height:300px; border-radius:12px; object-fit:cover;
+    background:var(--panel-bg-2); flex-shrink:0;
+  }
+  .bookCoverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:48px; }
+  /* Same rectangular feather as index.html's #zenImage/.bookCover rule
+     (that page's canonical definition - no #zenImage exists here, since
+     this page never renders the reveal engine itself, so this is scoped
+     to just the two classes that do exist here). Two independent linear
+     gradients (one per axis) composited for a rectangular fade with sharp
+     corners, not an oval vignette. */
+  .bookCover, .bookCoverPlaceholder {
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+  }
+  .bookTitle, .bookAuthor {
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    color:var(--book-pill-ink); text-align:center; width:100%; flex-shrink:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .bookTitle { font-size:18px; font-weight:700; line-height:1.3; }
+  .bookAuthor { font-size:16px; line-height:1.3; }
+  /* The library screen's own book pill (.libraryBookPill, defined further
+     down) reuses these same shared classes at a much smaller size - scoped
+     overrides here keep it exactly as it already looked, since only the
+     Home screen's copy of these classes was meant to change. */
+  .libraryBookPill .bookCover, .libraryBookPill .bookCoverPlaceholder { width:100%; height:auto; aspect-ratio:1/1; border-radius:8px; font-size:32px; }
+  .libraryBookPill .bookTitle { font-size:14px; }
+  .libraryBookPill .bookAuthor { font-size:12px; }
+
+  #libraryTopBar { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+  .iconBtn { box-sizing:border-box; width:36px; height:36px; border-radius:50%; border:1px solid var(--border); background:var(--panel-bg); color:var(--ink); display:flex; align-items:center; justify-content:center; padding:0; flex-shrink:0; }
+  .iconBtn.active { border-color:var(--accent); color:var(--accent); }
+  .iconBtn:disabled { opacity:0.35; }
+
+  .libraryBookPill { width:180px; height:auto; margin:0 auto 14px; cursor:default; }
+  .pillWrap { display:flex; flex-direction:column; gap:8px; width:100%; }
+  .chapterPill {
+    height:38px; width:100%; box-sizing:border-box; padding:0 16px;
+    border-radius:999px; border:1px solid var(--border); background:var(--panel-bg); color:var(--ink);
+    display:flex; align-items:center; justify-content:center; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; font-size:14px; cursor:pointer; flex-shrink:0;
+  }
+  /* Continue pill now carries two rows - the chapter/position line (as
+     before) plus a device row (monitor icon + device name) showing which
+     device Continue will actually resume on, so switching the target
+     device (see .deviceSwitchPill below) is reflected here immediately. */
+  .chapterPill.continuePill {
+    border-color:var(--accent); color:var(--accent); margin-bottom:14px;
+    height:auto; min-height:38px; flex-direction:column; gap:3px; padding:8px 16px;
+  }
+  .continueMainRow { font-size:14px; }
+  .continueDeviceRow { display:flex; align-items:center; gap:6px; font-size:12px; opacity:0.9; }
+  .continueDeviceRow svg { flex-shrink:0; }
+
+  /* Device-switch pills reuse .chapterPill's shape/sizing, just with an
+     icon+label row instead of plain text - same pattern used for the
+     continue pill's device row and the control screen's "playing now on"
+     pill below, all sharing .pillIconRow. */
+  .pillIconRow { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; }
+  .pillIconRow svg { flex-shrink:0; }
+  .chapterPill.deviceSwitchPill { margin-bottom:8px; }
+  .chapterPill.activeDevicePill { border-color:var(--accent); color:var(--accent); cursor:default; }
+
+  .sectionLabel { color:var(--muted2); font-size:12px; margin:16px 0 8px; text-transform:uppercase; letter-spacing:0.04em; }
+  #emptyMsg { color:var(--muted2); font-size:14px; }
+
+  .bookmarkWrap { position:relative; overflow:hidden; border-radius:999px; height:38px; width:100%; }
+  .bookmarkWrap .chapterPill { position:relative; z-index:1; width:100%; height:100%; }
+  .bookmarkDelete { position:absolute; top:0; right:0; bottom:0; width:72px; border:none; border-radius:0 999px 999px 0; background:#7a3030; color:#fff; font-size:13px; }
+
+  /* --- Now-playing/control screen: 4 centered rows --- */
+  #nowPlayingIcons { display:flex; justify-content:center; gap:10px; margin-bottom:20px; }
+  #nowPlayingIcons .iconBtn { position:static; }
+
+  #nowPlayingPill { position:relative; width:220px; aspect-ratio:1/1; margin:0 auto 20px; border-radius:16px; overflow:hidden; background:var(--panel-bg-2); }
+  #nowPlayingPill img, #nowPlayingPill .bookCoverPlaceholder { width:100%; height:100%; object-fit:cover; border-radius:0; }
+  #nowPlayingScrim {
+    position:absolute; left:0; right:0; bottom:0; padding:10px 12px 8px;
+    background:linear-gradient(to top, rgba(0,0,0,0.75), rgba(0,0,0,0));
+    color:#fff; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+  }
+  #nowPlayingTitle { font-size:15px; font-weight:600; }
+  #nowPlayingChapterInfo, #nowPlayingDeviceLine { font-size:12px; opacity:0.85; margin-top:2px; }
+
+  #progressTrack { position:relative; height:22px; display:flex; align-items:center; margin-bottom:8px; }
+  #progressTrackLine { position:relative; width:100%; height:3px; background:var(--progress-track); border-radius:2px; }
+  #progressFill { position:absolute; left:0; top:0; height:100%; width:0%; background:var(--accent); border-radius:2px; }
+  #progressMarker { position:absolute; top:50%; left:0%; width:12px; height:12px; margin-left:-6px; margin-top:-6px; border-radius:50%; background:var(--accent); }
+  #timeRow { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:20px; }
+
+  #playerControls { display:flex; justify-content:center; align-items:center; gap:20px; }
+
+  #volumePopup { display:none; flex-direction:column; gap:8px; align-items:center; margin-top:12px; }
+  #volumePopup.show { display:flex; }
+  #volumeLevelPill { font-size:13px; font-weight:600; }
+
+  #nowPlayingDevicePill { margin-top:16px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="homeScreen" class="screen show">
+    <div id="homeHeader">
+      <div id="homeTitle">SHAMA</div>
+      <div id="homeSubtitle"><span class="subtitleInitial">S</span>tylish <span class="subtitleInitial">H</span>umanlike <span class="subtitleInitial">A</span>udiobook <span class="subtitleInitial">M</span>ultiplatform <span class="subtitleInitial">A</span>pplication</div>
+    </div>
+    <div id="modeRow">
+      <a class="modePill current" href="remote.html">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="4"/><circle cx="12" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="16" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="none"/></svg>
+        <span>Remote</span>
+      </a>
+      <a class="modePill" href="index.html">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span>Player</span>
+      </a>
+    </div>
+    <div id="homeGrid"></div>
+  </div>
+
+  <div id="libraryScreen" class="screen">
+    <div id="libraryTopBar">
+      <button id="allBooksBtn" class="iconBtn" aria-label="All books">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      </button>
+    </div>
+    <div id="libraryBody" class="narrowCol"></div>
+  </div>
+
+  <div id="nowPlayingScreen" class="screen">
+    <div id="nowPlayingIcons">
+      <button id="libraryBtn" class="iconBtn" aria-label="Back to library">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      </button>
+      <button id="bookmarkBtn" class="iconBtn" aria-label="Bookmark this spot">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button id="themeToggleBtn" class="iconBtn" aria-label="Toggle light/dark theme">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <button id="presetToggleBtn" class="iconBtn" aria-label="Toggle text animation preset">あ</button>
+      <button id="volumeToggleBtn" class="iconBtn" aria-label="Volume">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>
+      </button>
+    </div>
+
+    <div id="nowPlayingPill">
+      <img id="nowPlayingCover" style="display:none;">
+      <div id="nowPlayingPlaceholder" class="bookCoverPlaceholder">&#9834;</div>
+      <div id="nowPlayingScrim">
+        <div id="nowPlayingTitle"></div>
+        <div id="nowPlayingChapterInfo"></div>
+        <div id="nowPlayingDeviceLine"></div>
+      </div>
+    </div>
+
+    <div id="progressTrack">
+      <div id="progressTrackLine">
+        <div id="progressFill"></div>
+        <div id="progressMarker"></div>
+      </div>
+    </div>
+    <div id="timeRow"><span id="elapsedLabel">0:00</span><span id="totalLabel">0:00</span></div>
+
+    <div id="playerControls">
+      <button id="prevChapterBtn" class="iconBtn" aria-label="Previous chapter">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+      </button>
+      <button id="prevPartBtn" class="iconBtn" aria-label="Previous part">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 19 2 12 11 5 11 19"/><polygon points="22 19 13 12 22 5 22 19"/></svg>
+      </button>
+      <button id="playPauseBtn" class="iconBtn" aria-label="Play">
+        <svg id="playIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6.5 3 20.5 12 6.5 21"/></svg>
+        <svg id="pauseIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+      <button id="nextPartBtn" class="iconBtn" aria-label="Next part">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 19 22 12 13 5 13 19"/><polygon points="2 19 11 12 2 5 2 19"/></svg>
+      </button>
+      <button id="nextChapterBtn" class="iconBtn" aria-label="Next chapter">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+      </button>
+    </div>
+
+    <div id="volumePopup">
+      <button id="volUpBtn" class="iconBtn">+</button>
+      <div id="volumeLevelPill">100</div>
+      <button id="volDownBtn" class="iconBtn">&minus;</button>
+    </div>
+
+    <button id="nowPlayingDevicePill" class="chapterPill activeDevicePill narrowCol">
+      <span class="pillIconRow">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span id="nowPlayingDeviceLabel"></span>
+      </span>
+    </button>
+  </div>
+
+</div>
+<div id="bookmarkToast" style="position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--panel-bg); color:var(--ink); padding:8px 16px; border-radius:999px; font-size:13px; opacity:0; transition:opacity 0.3s; pointer-events:none;"></div>
+
+<script>
+(function(){
+  var homeScreen = document.getElementById('homeScreen');
+  var homeTitle = document.getElementById('homeTitle');
+  var homeSubtitle = document.getElementById('homeSubtitle');
+  var modeRow = document.getElementById('modeRow');
+  var libraryScreen = document.getElementById('libraryScreen');
+  var nowPlayingScreen = document.getElementById('nowPlayingScreen');
+  var homeGrid = document.getElementById('homeGrid');
+  var libraryBody = document.getElementById('libraryBody');
+  var allBooksBtn = document.getElementById('allBooksBtn');
+  var bookmarkToast = document.getElementById('bookmarkToast');
+
+  var nowPlayingCover = document.getElementById('nowPlayingCover');
+  var nowPlayingPlaceholder = document.getElementById('nowPlayingPlaceholder');
+  var nowPlayingTitle = document.getElementById('nowPlayingTitle');
+  var nowPlayingChapterInfo = document.getElementById('nowPlayingChapterInfo');
+  var nowPlayingDeviceLine = document.getElementById('nowPlayingDeviceLine');
+  var nowPlayingDeviceLabel = document.getElementById('nowPlayingDeviceLabel');
+
+  var progressTrack = document.getElementById('progressTrack');
+  var progressFill = document.getElementById('progressFill');
+  var progressMarker = document.getElementById('progressMarker');
+  var elapsedLabel = document.getElementById('elapsedLabel');
+  var totalLabel = document.getElementById('totalLabel');
+
+  var playPauseBtn = document.getElementById('playPauseBtn');
+  var playIcon = document.getElementById('playIcon');
+  var pauseIcon = document.getElementById('pauseIcon');
+  var prevChapterBtn = document.getElementById('prevChapterBtn');
+  var prevPartBtn = document.getElementById('prevPartBtn');
+  var nextPartBtn = document.getElementById('nextPartBtn');
+  var nextChapterBtn = document.getElementById('nextChapterBtn');
+  var libraryBtn = document.getElementById('libraryBtn');
+  var bookmarkBtn = document.getElementById('bookmarkBtn');
+  var themeToggleBtn = document.getElementById('themeToggleBtn');
+  var presetToggleBtn = document.getElementById('presetToggleBtn');
+  var volumeToggleBtn = document.getElementById('volumeToggleBtn');
+  var volumePopup = document.getElementById('volumePopup');
+  var volumeLevelPill = document.getElementById('volumeLevelPill');
+  var volUpBtn = document.getElementById('volUpBtn');
+  var volDownBtn = document.getElementById('volDownBtn');
+
+  function showScreen(el){
+    [homeScreen, libraryScreen, nowPlayingScreen].forEach(function(s){ s.classList.toggle('show', s === el); });
+  }
+
+  // Same monitor glyph used everywhere a device is represented (continue
+  // pill's device row, switch-to pills, the control screen's "playing now
+  // on" pill) - and the same shape as index.html's #fullscreenToggleBtn.
+  var MONITOR_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>';
+
+  function humanize(base){
+    var m = base.match(/(\d+)$/);
+    return m ? ('Chapter ' + parseInt(m[1], 10)) : base;
+  }
+  function formatTime(s){
+    if (!isFinite(s) || s < 0) s = 0;
+    s = Math.round(s);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    var mm = (h > 0 && m < 10) ? ('0' + m) : String(m);
+    var ss = sec < 10 ? ('0' + sec) : String(sec);
+    return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
+  }
+
+  // --- Theme (dark/light) - same localStorage-persisted pattern as index.html.
+  var theme = 'dark';
+  try { theme = localStorage.getItem('theme') || 'dark'; } catch(e){}
+  function applyTheme(){
+    document.documentElement.classList.toggle('light', theme === 'light');
+  }
+  applyTheme();
+  themeToggleBtn.addEventListener('click', function(){
+    theme = theme === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('theme', theme); } catch(e){}
+    applyTheme();
+    sendCommand({ action: 'setTheme', value: theme });
+  });
+
+  var textPreset = 'A';
+  try { textPreset = localStorage.getItem('textPreset') || 'A'; } catch(e){}
+  presetToggleBtn.classList.toggle('active', textPreset === 'B');
+  presetToggleBtn.addEventListener('click', function(){
+    textPreset = textPreset === 'A' ? 'B' : 'A';
+    try { localStorage.setItem('textPreset', textPreset); } catch(e){}
+    presetToggleBtn.classList.toggle('active', textPreset === 'B');
+    sendCommand({ action: 'setPreset', value: textPreset });
+  });
+
+  var volumeLevel = 100;
+  volumeToggleBtn.addEventListener('click', function(){
+    volumePopup.classList.toggle('show');
+  });
+  function pushVolume(){
+    volumeLevelPill.textContent = volumeLevel;
+    sendCommand({ action: 'setVolume', value: volumeLevel / 100 });
+  }
+  volUpBtn.addEventListener('click', function(){ volumeLevel = Math.min(100, volumeLevel + 5); pushVolume(); });
+  volDownBtn.addEventListener('click', function(){ volumeLevel = Math.max(0, volumeLevel - 5); pushVolume(); });
+
+  function showBookmarkToast(text){
+    bookmarkToast.textContent = text;
+    bookmarkToast.style.opacity = '1';
+    setTimeout(function(){ bookmarkToast.style.opacity = '0'; }, 1600);
+  }
+
+  // --- WebSocket: this page is a "controller" - it never reports its own
+  // state, only sends load/transport commands and renders whatever `state`
+  // broadcast comes back for the currently-active device.
+  var deviceId;
+  try {
+    deviceId = localStorage.getItem('remoteDeviceId');
+    if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem('remoteDeviceId', deviceId); }
+  } catch (e) { deviceId = 'remote-' + Math.random().toString(36).slice(2); }
+
+  var ws = null;
+  var devices = [];
+  var selectedTargetDeviceId = null;
+  var activeState = null; // last `state` broadcast for whichever device is active
+
+  function wsSend(payload){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  }
+  function sendCommand(cmd){
+    cmd.type = 'command';
+    if (!cmd.targetDeviceId) cmd.targetDeviceId = selectedTargetDeviceId || undefined;
+    wsSend(cmd);
+  }
+  function sendLoad(bookId, chapterBase, positionSeconds){
+    var target = selectedTargetDeviceId || (devices[0] && devices[0].deviceId);
+    if (!target) { alert('No player devices are connected right now.'); return; }
+    sendCommand({ action: 'load', targetDeviceId: target, bookId: bookId, chapterBase: chapterBase, positionSeconds: positionSeconds || 0 });
+    showScreen(nowPlayingScreen);
+  }
+
+  // Switching the target device (a "Switch to X" pill on the library
+  // screen) hands over active-device status immediately, before any
+  // chapter is chosen - the next load/continue/bookmark click is what
+  // actually starts playback there. Re-renders the library so the continue
+  // pill's device row and the switch-pill list both reflect the new choice
+  // right away, rather than waiting on the next `devices` broadcast.
+  function switchActiveDevice(deviceId, bookId){
+    selectedTargetDeviceId = deviceId;
+    sendCommand({ action: 'switchActive', targetDeviceId: deviceId });
+    if (bookId) renderLibrary(bookId);
+  }
+
+  function renderNowPlaying(){
+    if (!activeState) return;
+    nowPlayingTitle.textContent = humanize(activeState.chapterBase || '');
+    nowPlayingChapterInfo.textContent = 'Chapter ' + activeState.chapterIndex + '/' + activeState.totalChapters +
+      ' · Part ' + activeState.partIndex + '/' + activeState.totalParts;
+    nowPlayingDeviceLine.textContent = 'Playing on ' + (activeState.deviceName || 'Unknown device');
+    nowPlayingCover.src = '/api/books/' + activeState.bookId + '/chapters/' + activeState.chapterBase + '/cover';
+    nowPlayingCover.style.display = '';
+    nowPlayingPlaceholder.style.display = 'none';
+    nowPlayingCover.onerror = function(){
+      nowPlayingCover.style.display = 'none';
+      nowPlayingPlaceholder.style.display = 'flex';
+    };
+
+    var pct = activeState.duration > 0 ? Math.max(0, Math.min(100, (activeState.position / activeState.duration) * 100)) : 0;
+    progressFill.style.width = pct + '%';
+    progressMarker.style.left = pct + '%';
+    elapsedLabel.textContent = formatTime(activeState.position);
+    totalLabel.textContent = formatTime(activeState.duration);
+
+    playIcon.style.display = activeState.paused ? '' : 'none';
+    pauseIcon.style.display = activeState.paused ? 'none' : '';
+    presetToggleBtn.classList.toggle('active', activeState.preset === 'B');
+
+    nowPlayingDeviceLabel.textContent = activeState.deviceName || 'Unknown device';
+  }
+
+  function handleServerMessage(msg){
+    if (msg.type === 'devices') {
+      devices = msg.devices || [];
+      if (!selectedTargetDeviceId || !devices.some(function(d){ return d.deviceId === selectedTargetDeviceId; })) {
+        var active = devices.find(function(d){ return d.isActive; });
+        selectedTargetDeviceId = active ? active.deviceId : (devices[0] && devices[0].deviceId);
+      }
+      return;
+    }
+    if (msg.type === 'state') {
+      activeState = msg;
+      renderNowPlaying();
+      updateHomeCurrentHighlight();
+      return;
+    }
+  }
+
+  function connect(){
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.addEventListener('open', function(){
+      wsSend({ type: 'hello', role: 'controller', deviceId: deviceId, deviceName: 'Remote', deviceKind: 'controller' });
+    });
+    ws.addEventListener('message', function(ev){
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handleServerMessage(msg);
+    });
+    ws.addEventListener('close', function(){ setTimeout(connect, 2000); });
+    ws.addEventListener('error', function(){ try { ws.close(); } catch (e) {} });
+  }
+  connect();
+
+  // --- Now-playing control row actions ---
+  playPauseBtn.addEventListener('click', function(){ sendCommand({ action: 'playPause' }); });
+  prevPartBtn.addEventListener('click', function(){ sendCommand({ action: 'prev' }); });
+  nextPartBtn.addEventListener('click', function(){ sendCommand({ action: 'next' }); });
+  // Matches common media-player "previous track" semantics: a single press
+  // restarts the current chapter (seek to 0) rather than jumping back -
+  // only a second press within PREV_CHAPTER_DOUBLE_MS actually navigates
+  // to the previous chapter.
+  var PREV_CHAPTER_DOUBLE_MS = 1500;
+  var lastPrevChapterClick = 0;
+  prevChapterBtn.addEventListener('click', function(){
+    var now = Date.now();
+    if (now - lastPrevChapterClick < PREV_CHAPTER_DOUBLE_MS) {
+      lastPrevChapterClick = 0;
+      sendCommand({ action: 'prevChapter' });
+    } else {
+      lastPrevChapterClick = now;
+      sendCommand({ action: 'seek', value: 0 });
+    }
+  });
+  nextChapterBtn.addEventListener('click', function(){ sendCommand({ action: 'nextChapter' }); });
+  libraryBtn.addEventListener('click', function(){
+    // Same bug class index.html already hit once (see CLAUDE.md: "stale
+    // Continue pill after leaving via the library icon") - just toggling
+    // screens re-shows whatever renderLibrary() last built, which won't
+    // reflect a bookmark just added or the position having moved on since.
+    // Prefer the actively-playing device's own bookId over whatever was
+    // last browsed, since that's the book this button conceptually means
+    // "go back to the library for."
+    var bookId = (activeState && activeState.bookId) || currentLibraryBookId;
+    showScreen(libraryScreen);
+    if (bookId) renderLibrary(bookId);
+  });
+  bookmarkBtn.addEventListener('click', async function(){
+    if (!activeState) return;
+    try {
+      await fetch('/api/books/' + activeState.bookId + '/bookmarks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapterBase: activeState.chapterBase, positionSeconds: activeState.position })
+      });
+      showBookmarkToast('Bookmarked ' + formatTime(activeState.position));
+    } catch (e) { showBookmarkToast('Could not save bookmark'); }
+  });
+
+  progressTrack.addEventListener('pointerdown', function(e){
+    if (!activeState || !activeState.duration) return;
+    var rect = progressTrack.getBoundingClientRect();
+    var frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    sendCommand({ action: 'seek', value: frac * activeState.duration });
+  });
+
+  // --- Home screen ---
+  async function renderHome(){
+    homeGrid.innerHTML = '';
+    var res;
+    try {
+      res = await fetch('/api/books').then(function(r){ return r.json(); });
+    } catch (e) {
+      homeGrid.innerHTML = '<p id="emptyMsg">Could not reach the server.</p>';
+      return;
+    }
+    (res.books || []).forEach(function(book){
+      var pill = document.createElement('div');
+      pill.className = 'bookPill';
+      pill.dataset.bookId = book.id;
+      var cover = document.createElement('img');
+      cover.className = 'bookCover';
+      cover.src = '/api/books/' + book.id + '/cover';
+      cover.onerror = function(){
+        cover.replaceWith(Object.assign(document.createElement('div'), { className: 'bookCoverPlaceholder', innerHTML: '&#9834;' }));
+      };
+      pill.appendChild(cover);
+      var titleEl = document.createElement('div');
+      titleEl.className = 'bookTitle';
+      titleEl.textContent = book.title;
+      pill.appendChild(titleEl);
+      var authorEl = document.createElement('div');
+      authorEl.className = 'bookAuthor';
+      authorEl.textContent = book.author || '';
+      pill.appendChild(authorEl);
+      pill.addEventListener('click', function(){
+        showScreen(libraryScreen);
+        renderLibrary(book.id);
+      });
+      homeGrid.appendChild(pill);
+    });
+    updateHomeCurrentHighlight();
+  }
+
+  // Highlights whichever book pill matches the currently-active device's
+  // book (orange border, same .current class the player page uses for its
+  // own locally-selected book) - "currently playing" here means whatever
+  // the active device is on, not anything browsed locally on this page.
+  // Called after every renderHome() and again whenever a fresh `state`
+  // broadcast arrives, since activeState is usually still null the first
+  // time renderHome() runs (the WS handshake's reply hasn't landed yet).
+  function updateHomeCurrentHighlight(){
+    var currentId = activeState && activeState.bookId;
+    var currentPill = null;
+    homeGrid.querySelectorAll('.bookPill').forEach(function(pill){
+      var isCurrent = !!currentId && pill.dataset.bookId === currentId;
+      pill.classList.toggle('current', isCurrent);
+      if (isCurrent) currentPill = pill;
+    });
+    // Moves the active book's pill to be the grid's first DOM child, not
+    // just highlighted in place - flex-wrap then naturally puts it first/
+    // leftmost in a wrapped row, and it's therefore also the first (top)
+    // pill once the grid collapses to a single column on mobile/tablet,
+    // with no separate narrow-viewport handling needed.
+    if (currentPill && homeGrid.firstElementChild !== currentPill) {
+      homeGrid.insertBefore(currentPill, homeGrid.firstChild);
+    }
+  }
+  // Carbon copy of index.html's fitTextToWidth()/fitHomeHeader() - scales
+  // #homeTitle/#homeSubtitle's font-size proportionally (not hardcoded) so
+  // their rendered text width snugly fills the shared 800px/80vw box
+  // #homeTitle/#homeSubtitle/#modeRow all use (see the CSS). Measuring at
+  // a baseline size and computing a single scale factor works cleanly
+  // since letter-spacing is em-based and therefore already scales
+  // linearly with font-size.
+  function fitTextToWidth(el, targetWidth){
+    if (!targetWidth) return;
+    el.style.fontSize = '100px';
+    var natural = el.scrollWidth;
+    if (natural <= 0) return;
+    el.style.fontSize = (100 * (targetWidth / natural) * 0.98) + 'px';
+  }
+
+  function fitHomeHeader(){
+    if (!homeScreen.classList.contains('show')) return; // nothing to measure while hidden
+    fitTextToWidth(homeTitle, homeTitle.clientWidth);
+    if (getComputedStyle(homeSubtitle).display !== 'none') {
+      fitTextToWidth(homeSubtitle, homeSubtitle.clientWidth);
+      modeRow.style.marginTop = (homeSubtitle.offsetHeight / 2) + 'px';
+    } else {
+      modeRow.style.marginTop = '';
+    }
+  }
+  window.addEventListener('resize', fitHomeHeader);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitHomeHeader);
+
+  allBooksBtn.addEventListener('click', function(){ showScreen(homeScreen); renderHome(); fitHomeHeader(); });
+
+  // --- Library screen ---
+  var currentLibraryBookId = null;
+  var DELETE_WIDTH = 72;
+
+  async function renderLibrary(bookId){
+    currentLibraryBookId = bookId;
+    libraryBody.innerHTML = '';
+
+    var booksRes = await fetch('/api/books').then(function(r){ return r.json(); }).catch(function(){ return { books: [] }; });
+    var book = (booksRes.books || []).find(function(b){ return b.id === bookId; }) || {};
+
+    var chaptersRes = await fetch('/api/books/' + bookId + '/chapters').then(function(r){ return r.json(); }).catch(function(){ return { chapters: [] }; });
+    var chapters = chaptersRes.chapters || [];
+
+    var leftCol = document.createElement('div');
+    leftCol.className = 'bookPill libraryBookPill';
+    var cover = document.createElement('img');
+    cover.className = 'bookCover';
+    cover.src = '/api/books/' + bookId + '/cover';
+    cover.onerror = function(){
+      cover.replaceWith(Object.assign(document.createElement('div'), { className: 'bookCoverPlaceholder', innerHTML: '&#9834;' }));
+    };
+    leftCol.appendChild(cover);
+    var leftTitle = document.createElement('div');
+    leftTitle.className = 'bookTitle';
+    leftTitle.textContent = book.title || bookId;
+    leftCol.appendChild(leftTitle);
+    var leftAuthor = document.createElement('div');
+    leftAuthor.className = 'bookAuthor';
+    leftAuthor.textContent = book.author || '';
+    leftCol.appendChild(leftAuthor);
+    libraryBody.appendChild(leftCol);
+
+    var extra = { lastPosition: null, bookmarks: [] };
+    try {
+      extra = await fetch('/api/books/' + bookId + '/bookmarks-and-last-position').then(function(r){ return r.json(); });
+    } catch (e) {}
+
+    if (extra.lastPosition) {
+      var targetDevice = devices.find(function(d){ return d.deviceId === selectedTargetDeviceId; });
+      var continuePill = document.createElement('button');
+      continuePill.className = 'chapterPill continuePill';
+      var mainRow = document.createElement('div');
+      mainRow.className = 'continueMainRow';
+      mainRow.textContent = 'Continue: ' + humanize(extra.lastPosition.chapterBase) + ' (' + formatTime(extra.lastPosition.positionSeconds) + ')';
+      var deviceRow = document.createElement('div');
+      deviceRow.className = 'continueDeviceRow';
+      deviceRow.innerHTML = MONITOR_ICON + '<span>' + (targetDevice ? targetDevice.deviceName : 'No device connected') + '</span>';
+      continuePill.appendChild(mainRow);
+      continuePill.appendChild(deviceRow);
+      continuePill.addEventListener('click', function(){ sendLoad(bookId, extra.lastPosition.chapterBase, extra.lastPosition.positionSeconds); });
+      libraryBody.appendChild(continuePill);
+    }
+
+    // Switch-to-device pills: every connected player/TV-player device other
+    // than whichever one is currently targeted - clicking one hands over
+    // active-device status right away (see switchActiveDevice()), before
+    // any chapter/continue/bookmark is actually chosen.
+    devices.forEach(function(d){
+      if (d.deviceId === selectedTargetDeviceId) return;
+      var pill = document.createElement('button');
+      pill.className = 'chapterPill deviceSwitchPill';
+      pill.innerHTML = '<span class="pillIconRow">' + MONITOR_ICON + '<span>Switch to ' + d.deviceName + '</span></span>';
+      pill.addEventListener('click', function(){ switchActiveDevice(d.deviceId, bookId); });
+      libraryBody.appendChild(pill);
+    });
+
+    if (chapters.length === 0) {
+      var msg = document.createElement('p');
+      msg.id = 'emptyMsg';
+      msg.textContent = 'No chapters found for this book.';
+      libraryBody.appendChild(msg);
+    } else {
+      var chapterWrap = document.createElement('div');
+      chapterWrap.className = 'pillWrap';
+      chapters.forEach(function(base){
+        var pill = document.createElement('button');
+        pill.className = 'chapterPill';
+        pill.textContent = humanize(base);
+        // Persistent chapter progress: re-opening the chapter you were
+        // already on resumes where you left off instead of restarting at
+        // 0 - only the single most-recently-active chapter is remembered
+        // (the existing last-position row), not full per-chapter history.
+        var resumeSeconds = (extra.lastPosition && extra.lastPosition.chapterBase === base) ? extra.lastPosition.positionSeconds : 0;
+        pill.addEventListener('click', function(){ sendLoad(bookId, base, resumeSeconds); });
+        chapterWrap.appendChild(pill);
+      });
+      libraryBody.appendChild(chapterWrap);
+    }
+
+    renderBookmarksSection(bookId, extra.bookmarks || []);
+  }
+
+  function renderBookmarksSection(bookId, bookmarks){
+    if (!bookmarks.length) return;
+    var label = document.createElement('div');
+    label.className = 'sectionLabel';
+    label.textContent = 'Bookmarks';
+    libraryBody.appendChild(label);
+    var wrapEl = document.createElement('div');
+    wrapEl.className = 'pillWrap';
+    libraryBody.appendChild(wrapEl);
+
+    var openRowWrap = null;
+    bookmarks.forEach(function(bm){
+      var wrap = document.createElement('div');
+      wrap.className = 'bookmarkWrap';
+
+      var deleteBtn = document.createElement('button');
+      deleteBtn.className = 'bookmarkDelete';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.addEventListener('click', async function(){
+        await fetch('/api/books/' + bookId + '/bookmarks/' + bm.id, { method: 'DELETE' });
+        renderLibrary(bookId);
+      });
+
+      var row = document.createElement('button');
+      row.className = 'chapterPill bookmarkRow';
+      row.textContent = bm.label + ' — ' + humanize(bm.chapterBase);
+      row.style.touchAction = 'pan-y';
+
+      var isOpen = false, dragStartX = null, baseX = 0;
+      function setOffset(px){ row.style.transform = 'translateX(' + px + 'px)'; }
+      wrap._closeBookmarkRow = function(){ isOpen = false; row.style.transition = 'transform 0.2s'; setOffset(0); };
+
+      row.addEventListener('pointerdown', function(e){
+        dragStartX = e.clientX;
+        baseX = isOpen ? -DELETE_WIDTH : 0;
+        row.style.transition = 'none';
+        try { row.setPointerCapture(e.pointerId); } catch (err) {}
+      });
+      row.addEventListener('pointermove', function(e){
+        if (dragStartX === null) return;
+        var offset = baseX + (e.clientX - dragStartX);
+        setOffset(Math.max(-DELETE_WIDTH, Math.min(0, offset)));
+      });
+      row.addEventListener('pointerup', function(e){
+        if (dragStartX === null) return;
+        var dx = e.clientX - dragStartX;
+        dragStartX = null;
+        row.style.transition = 'transform 0.2s';
+        if (Math.abs(dx) < 8) {
+          if (isOpen) wrap._closeBookmarkRow();
+          else sendLoad(bookId, bm.chapterBase, bm.positionSeconds);
+          return;
+        }
+        var finalOffset = baseX + dx;
+        if (finalOffset <= -DELETE_WIDTH / 2) {
+          if (openRowWrap && openRowWrap !== wrap) openRowWrap._closeBookmarkRow();
+          openRowWrap = wrap;
+          isOpen = true;
+          setOffset(-DELETE_WIDTH);
+        } else {
+          isOpen = false;
+          setOffset(0);
+        }
+      });
+      row.addEventListener('pointercancel', function(){ dragStartX = null; });
+
+      wrap.appendChild(deleteBtn);
+      wrap.appendChild(row);
+      wrapEl.appendChild(wrap);
+    });
+  }
+
+  renderHome();
+  fitHomeHeader();
+})();
+</script>
+</body>
+</html>

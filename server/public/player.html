@@ -1,0 +1,1458 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230b0b0d'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Roboto, Arial, sans-serif' font-weight='700' font-size='20' fill='%23e08a3c'%3ES%3C/text%3E%3C/svg%3E">
+<title>SHAMA Player</title>
+<!--
+  LAYER 4 of the app-shell rebuild (see CLAUDE.md's layer map). The reader
+  screen only - a faithful port of _legacy-index.html's #readerScreen (zen
+  mode, karaoke text reveal, gestures, volume/speed popups, marquee, wake
+  lock, responsive player-controls collapse), with three real changes:
+
+  1. Chapter/book identity comes entirely from the URL (?book=&chapter=&t=),
+     set by chapter.html's playChapter() - not from any ambient "currently
+     selected book" concept. Sync/images/audio/cover/metadata are fetched
+     directly via REST (same endpoints tv-player.html already uses
+     successfully), NOT through bridge-shim.js/window.Android - there is no
+     "prepare" step, real Range-serving handles seeking on its own, so
+     chapterTimeOffset's whole fake-seek workaround (needed only for the
+     Android app's SAF+WebView limitations) doesn't apply here either.
+
+  2. Registers on the shared WebSocket as role:'player' on load (see
+     server/src/sync.js's device-priority rules) - arriving here is itself
+     what claims active-device status, no separate self-load round-trip
+     needed. A `killed` command (this device displaced by a new normal
+     player or tv-player elsewhere) shows a plain "SHAMA Session Ended."
+     screen with a single Home button - no auto-recovery, matches the
+     rebuild spec exactly (replacing the old "Playing on Other Device /
+     Refresh to play" design).
+
+  3. No-fill design language applied throughout (.iconBtn/.pill/speed
+     panel buttons all lost their background fill) to match index.html/
+     library.html/chapter.html - the one deliberate deviation from "keep
+     it exactly like the current working player."
+
+  The Library icon always navigates to chapter.html?book=<current
+  book>&mode=player - opening this page always forces player mode there,
+  per the rebuild spec.
+-->
+<style>
+  :root {
+    --bg:#0b0b0d; --ink:#e8e6ea; --panel-bg:#17161a; --panel-bg-2:#1c1a20;
+    --border:#3a3840; --muted:#9b93b0; --muted2:#9a97a0; --placeholder-ink:#4a4650;
+    --accent:#e08a3c; --progress-track:#2a2830;
+    --timerow-ink:#c9c6cf;
+    --read-text-base:#d6d6d6; --read-text-highlight-a:#F6CAC0; --read-text-b:#d6d6d6;
+    --zen-overlay-bg:rgba(23,22,26,0.82);
+  }
+  :root.light {
+    --bg:#e5decf; --ink:#000000; --panel-bg:#ddd3bd; --panel-bg-2:#efe8d8;
+    --border:#b8ab8e; --muted:#7a6f58; --muted2:#8a7f68; --placeholder-ink:#a89a7d;
+    --accent:#e08a3c; --progress-track:#cfc3a8;
+    --timerow-ink:#4a4030;
+    --read-text-base:#d0d0d0; --read-text-highlight-a:#000000; --read-text-b:#000000;
+    --zen-overlay-bg:rgba(221,211,189,0.88);
+  }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:"Roboto","Arial",sans-serif; overflow:hidden; }
+
+  #readerScreen { display:none; position:relative; height:100%; box-sizing:border-box; flex-direction:column; padding:16px; gap:10px; touch-action:none; }
+
+  #readerTopBar { position:absolute; top:16px; left:16px; z-index:5; display:flex; gap:8px; }
+  /* No fill, per the explicit "keep consistency of no fill for all pills
+     and buttons" instruction - every other button in this build already
+     uses the same border+currentColor affordance with no background. */
+  .iconBtn { box-sizing:border-box; width:36px; height:36px; border-radius:50%; border:1px solid var(--border); background:none; color:var(--ink); display:flex; align-items:center; justify-content:center; padding:0; font-family:inherit; }
+  .iconBtn:disabled { opacity:0.35; cursor:default; }
+
+  #playerControls { display:flex; justify-content:center; align-items:center; gap:20px; min-width:0; }
+  #playerControls.hide-chapter #prevChapterBtn,
+  #playerControls.hide-chapter #nextChapterBtn { display:none; }
+  #playerControls.hide-part #prevPartBtn,
+  #playerControls.hide-part #nextPartBtn { display:none; }
+  #playerControls.hide-playpause #playPauseBtn { display:none; }
+
+  #volumeToggleBtn { position:absolute; top:16px; right:16px; z-index:5; }
+  #presetToggleBtn { position:absolute; top:16px; right:60px; z-index:5; font-size:16px; font-weight:500; }
+  #themeToggleBtn { position:absolute; top:16px; right:104px; z-index:5; }
+  #fullscreenToggleBtn, #forceZenBtn { position:absolute; top:16px; right:148px; z-index:5; }
+  #forceZenBtn.active { border-color:var(--accent); color:var(--accent); }
+  @media (pointer: coarse) { #fullscreenToggleBtn { display:none; } }
+  @media (pointer: fine) { #forceZenBtn { display:none; } }
+
+  #volumePopup {
+    display:none; flex-direction:column; gap:10px;
+    position:absolute; top:62px; right:16px; z-index:5;
+  }
+  #volumePopup.show { display:flex; }
+  #volumeLevelPill { font-size:13px; font-weight:600; cursor:default; }
+
+  #frame { flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:64px 26px 26px; box-sizing:border-box; }
+  #pageText { writing-mode:vertical-rl; height:100%; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:var(--read-text-base); font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; overflow-wrap:anywhere; }
+  #pageText span { transition:color 0.2s ease, opacity 0.15s linear; }
+  #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; white-space:normal; overflow-wrap:anywhere; }
+  #loadingOverlay { display:none; color:var(--muted); font-size:14px; text-align:center; }
+
+  #readerScreen.chrome-hidden #readerTopBar,
+  #readerScreen.chrome-hidden #presetToggleBtn,
+  #readerScreen.chrome-hidden #themeToggleBtn,
+  #readerScreen.chrome-hidden #fullscreenToggleBtn,
+  #readerScreen.chrome-hidden #forceZenBtn,
+  #readerScreen.chrome-hidden #volumeToggleBtn,
+  #readerScreen.chrome-hidden #volumePopup { display:none; }
+  #readerScreen.chrome-hidden #zenChromeOverlay { display:none !important; }
+
+  #readerScreen.zen #frame { padding:5vh 5vw; gap:2vw; justify-content:flex-end; }
+  #readerScreen.zen.desktop #frame { padding:3vh 3vw; gap:2vw; justify-content:flex-end; }
+  #readerScreen.zen.desktop.fullscreen #frame { padding:5vh 5vw; }
+
+  #zenChromeOverlay { display:contents; }
+  #readerScreen.zen:not(.desktop) #zenChromeOverlay,
+  #readerScreen.zen.desktop.fullscreen #zenChromeOverlay {
+    display:flex; flex-direction:column; gap:10px;
+    position:absolute; left:16px; right:16px; bottom:16px; z-index:6;
+    background:var(--zen-overlay-bg); border-radius:16px; padding:12px 16px;
+    box-sizing:border-box; backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+  }
+
+  #zenImageWrap { display:none; align-items:center; flex-shrink:0; }
+  #zenImage { height:100%; width:100%; object-fit:contain; border-radius:8px; }
+  /* Rectangular feather, shared with the zen side image and the meta
+     row's cover art (both #coverArt and its no-cover placeholder) - same
+     two-linear-gradient intersect/source-in mask used everywhere else in
+     this app. */
+  #zenImage, #coverArt, #coverPlaceholder {
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+  }
+
+  #bookmarkToast { position:fixed; left:50%; top:16px; transform:translateX(-50%);
+    background:var(--panel-bg); border:1px solid var(--border); color:var(--ink); padding:8px 16px;
+    border-radius:999px; font-size:13px; opacity:0; transition:opacity 0.3s;
+    pointer-events:none; z-index:20; white-space:nowrap; }
+  #bookmarkToast.show { opacity:1; }
+
+  #timeRow { display:flex; justify-content:space-between; font-size:12px; color:var(--timerow-ink); padding:0 2px; }
+
+  #progressTrack { position:relative; height:22px; display:flex; align-items:center; }
+  #progressTrackLine { position:relative; width:100%; height:3px; background:var(--progress-track); border-radius:2px; overflow:visible; }
+  #progressFill { position:absolute; left:0; top:0; height:100%; width:0%; background:var(--accent); border-radius:2px; }
+  #progressMarker { position:absolute; top:50%; left:0%; width:12px; height:12px; margin-left:-6px; margin-top:-6px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 6px rgba(224,138,60,0.15); }
+
+  #metaRow { display:grid; grid-template-columns: minmax(0, 220px) minmax(36px, 1fr) auto; align-items:center; gap:12px; }
+  #metaLeftInfo { display:flex; align-items:center; gap:12px; min-width:0; }
+  #coverArt, #coverPlaceholder { width:56px; height:56px; border-radius:6px; flex-shrink:0; object-fit:cover; background:var(--panel-bg-2); border:1px solid var(--border); }
+  #coverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:22px; }
+
+  #metaTextCol { min-width:0; display:flex; flex-direction:column; gap:8px; justify-content:center; }
+  #chapterTitle { min-width:0; font-size:16px; font-weight:600; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .marqueeBox { min-width:0; overflow:hidden; white-space:nowrap; font-size:12px; color:var(--muted); }
+  .marqueeBox .marqueeInner { display:inline-flex; }
+  .marqueeBox .marqueeGap { display:inline-block; width:36px; flex-shrink:0; }
+
+  #metaPillCol { min-width:0; flex-shrink:0; display:flex; flex-direction:column; align-items:flex-end; justify-content:center; gap:8px; }
+  .marqueeBox.scrolling .marqueeInner { animation-name: marqueeScroll; animation-timing-function: linear; animation-iteration-count: infinite; }
+  @keyframes marqueeScroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+  .pill { flex-shrink:0; display:flex; align-items:center; gap:6px; height:24px; box-sizing:border-box; padding:0 12px; border-radius:999px; border:1px solid var(--border); background:none; color:var(--ink); font-size:12px; white-space:nowrap; font-family:inherit; }
+  .pill svg { flex-shrink:0; }
+
+  #speedOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); align-items:center; justify-content:center; z-index:10; touch-action:none; }
+  #speedPanel { width:min(320px, 84vw); background:var(--panel-bg-2); border:1px solid var(--border); border-radius:16px; padding:20px; box-sizing:border-box; }
+  #speedValueRow { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  #speedValueRow button { width:40px; height:40px; border-radius:50%; border:1px solid var(--border); background:none; color:var(--ink); font-size:20px; font-family:inherit; }
+  #speedValue { font-size:26px; font-weight:600; color:var(--accent); }
+  #speedSliderRow { display:flex; align-items:center; gap:10px; font-size:11px; color:var(--muted); margin-bottom:14px; }
+  #speedSlider { flex:1; }
+  #speedPresets { display:flex; justify-content:space-between; gap:6px; }
+  #speedPresets button { flex:1; padding:8px 0; border-radius:10px; border:1px solid var(--border); background:none; color:var(--ink); font-size:12px; font-family:inherit; }
+
+  #sessionEndedScreen {
+    display:none; position:fixed; inset:0; flex-direction:column; align-items:center;
+    justify-content:center; gap:16px; background:var(--bg); z-index:50; text-align:center;
+    padding:24px; box-sizing:border-box;
+  }
+  #sessionEndedTitle { font-size:48px; font-weight:700; letter-spacing:0.15em; color:var(--ink); }
+  #sessionEndedSubtitle { font-size:18px; color:var(--muted); }
+  #sessionEndedHomeBtn {
+    display:flex; align-items:center; gap:8px; height:46px; padding:0 24px; margin-top:8px;
+    border-radius:999px; border:1px solid var(--border); background:none; color:var(--ink);
+    text-decoration:none; font-size:14px; font-weight:600; text-transform:uppercase;
+    font-family:"Roboto","Arial",sans-serif;
+  }
+</style>
+</head>
+<body>
+
+<div id="readerScreen">
+  <div id="readerTopBar">
+    <button id="libraryBtn" class="iconBtn" aria-label="Back to chapter list">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></svg>
+    </button>
+    <button id="bookmarkBtn" class="iconBtn" aria-label="Bookmark this spot">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4V3z"/></svg>
+    </button>
+  </div>
+  <button id="fullscreenToggleBtn" class="iconBtn" aria-label="Toggle fullscreen zen mode">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+  </button>
+  <button id="forceZenBtn" class="iconBtn" aria-label="Toggle zen mode">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+  </button>
+  <button id="themeToggleBtn" class="iconBtn" aria-label="Toggle light/dark theme">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+  </button>
+  <button id="presetToggleBtn" class="iconBtn" aria-label="Toggle text animation preset">あ</button>
+  <button id="volumeToggleBtn" class="iconBtn" aria-label="Volume">
+    <svg id="volumeIconNormal" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><path d="M16 8a5 5 0 0 1 0 8"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
+    <svg id="volumeIconMuted" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>
+  </button>
+  <div id="volumePopup">
+    <button id="volumeUpBtn" class="iconBtn" aria-label="Increase volume">+</button>
+    <div id="volumeLevelPill" class="iconBtn">100</div>
+    <button id="volumeDownBtn" class="iconBtn" aria-label="Decrease volume">&minus;</button>
+    <button id="muteBtn" class="iconBtn" aria-label="Mute">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>
+    </button>
+  </div>
+
+  <div id="frame">
+    <div id="pageText"></div>
+    <div id="loadingOverlay">Loading&hellip;</div>
+    <div id="measure"></div>
+    <div id="zenImageWrap"><img id="zenImage"></div>
+  </div>
+
+  <div id="bookmarkToast"></div>
+
+  <div id="zenChromeOverlay">
+  <div id="timeRow">
+    <span id="elapsedLabel">0:00</span>
+    <span id="totalLabel">0:00</span>
+  </div>
+  <div id="progressTrack">
+    <div id="progressTrackLine">
+      <div id="progressFill"></div>
+      <div id="progressMarker"></div>
+    </div>
+  </div>
+
+  <div id="metaRow">
+    <div id="metaLeftInfo">
+      <img id="coverArt" style="display:none;">
+      <div id="coverPlaceholder">&#9834;</div>
+      <div id="metaTextCol">
+        <div id="chapterTitle"></div>
+        <div id="authorTitle" class="marqueeBox"></div>
+      </div>
+    </div>
+
+    <div id="playerControls">
+      <button id="prevChapterBtn" class="iconBtn" aria-label="Previous chapter">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+      </button>
+      <button id="prevPartBtn" class="iconBtn" aria-label="Previous part">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button id="playPauseBtn" class="iconBtn" aria-label="Play">
+        <svg id="playIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="6.5 3 20.5 12 6.5 21 6.5 3"/>
+        </svg>
+        <svg id="pauseIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+      <button id="nextPartBtn" class="iconBtn" aria-label="Next part">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+      <button id="nextChapterBtn" class="iconBtn" aria-label="Next chapter">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+      </button>
+    </div>
+
+    <div id="metaPillCol">
+      <div id="chapterPill" class="pill"></div>
+      <button id="speedPill" class="pill">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 12 L16 8"/><circle cx="12" cy="12" r="9"/></svg>
+        <span id="speedLabel">1.00x</span>
+      </button>
+    </div>
+  </div>
+  </div>
+
+  <audio id="audio"></audio>
+</div>
+
+<div id="sessionEndedScreen">
+  <div id="sessionEndedTitle">SHAMA</div>
+  <div id="sessionEndedSubtitle">Time to go home...</div>
+  <a id="sessionEndedHomeBtn" href="index.html">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+    <span>Home</span>
+  </a>
+</div>
+
+<div id="speedOverlay">
+  <div id="speedPanel">
+    <div id="speedValueRow">
+      <button id="speedDown">&#8249;</button>
+      <div id="speedValue">1.00x</div>
+      <button id="speedUp">&#8250;</button>
+    </div>
+    <div id="speedSliderRow">
+      <span>0.25</span>
+      <input type="range" id="speedSlider" min="0.25" max="8" step="0.01" value="1">
+      <span>8.00</span>
+    </div>
+    <div id="speedPresets">
+      <button data-speed="0.8">0.8</button>
+      <button data-speed="1.0">1.0</button>
+      <button data-speed="1.25">1.25</button>
+      <button data-speed="1.5">1.5</button>
+      <button data-speed="2.0">2.0</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var readerScreen = document.getElementById('readerScreen');
+  var sessionEndedScreen = document.getElementById('sessionEndedScreen');
+
+  var audio = document.getElementById('audio');
+  var pageText = document.getElementById('pageText');
+  var measure = document.getElementById('measure');
+  var frame = document.getElementById('frame');
+  var loadingOverlay = document.getElementById('loadingOverlay');
+  var bookmarkToast = document.getElementById('bookmarkToast');
+  var libraryBtn = document.getElementById('libraryBtn');
+  var bookmarkBtn = document.getElementById('bookmarkBtn');
+  var presetToggleBtn = document.getElementById('presetToggleBtn');
+  var volumeToggleBtn = document.getElementById('volumeToggleBtn');
+  var volumePopup = document.getElementById('volumePopup');
+  var volumeUpBtn = document.getElementById('volumeUpBtn');
+  var volumeDownBtn = document.getElementById('volumeDownBtn');
+  var volumeLevelPill = document.getElementById('volumeLevelPill');
+  var muteBtn = document.getElementById('muteBtn');
+  var volumeIconNormal = document.getElementById('volumeIconNormal');
+  var volumeIconMuted = document.getElementById('volumeIconMuted');
+  var themeToggleBtn = document.getElementById('themeToggleBtn');
+  var fullscreenToggleBtn = document.getElementById('fullscreenToggleBtn');
+  var forceZenBtn = document.getElementById('forceZenBtn');
+  var zenImageWrap = document.getElementById('zenImageWrap');
+  var zenImage = document.getElementById('zenImage');
+
+  var elapsedLabel = document.getElementById('elapsedLabel');
+  var totalLabel = document.getElementById('totalLabel');
+  var progressTrack = document.getElementById('progressTrack');
+  var progressFill = document.getElementById('progressFill');
+  var progressMarker = document.getElementById('progressMarker');
+
+  var playerControls = document.getElementById('playerControls');
+  var prevChapterBtn = document.getElementById('prevChapterBtn');
+  var prevPartBtn = document.getElementById('prevPartBtn');
+  var playPauseBtn = document.getElementById('playPauseBtn');
+  var playIcon = document.getElementById('playIcon');
+  var pauseIcon = document.getElementById('pauseIcon');
+  var nextPartBtn = document.getElementById('nextPartBtn');
+  var nextChapterBtn = document.getElementById('nextChapterBtn');
+
+  var coverArt = document.getElementById('coverArt');
+  var coverPlaceholder = document.getElementById('coverPlaceholder');
+  var chapterTitleEl = document.getElementById('chapterTitle');
+  var authorTitleEl = document.getElementById('authorTitle');
+  var chapterPill = document.getElementById('chapterPill');
+
+  var speedPill = document.getElementById('speedPill');
+  var speedLabel = document.getElementById('speedLabel');
+  var speedOverlay = document.getElementById('speedOverlay');
+  var speedValue = document.getElementById('speedValue');
+  var speedSlider = document.getElementById('speedSlider');
+  var speedDown = document.getElementById('speedDown');
+  var speedUp = document.getElementById('speedUp');
+
+  var params = new URLSearchParams(location.search);
+  var urlBookId = params.get('book');
+  var urlChapterBase = params.get('chapter');
+  var urlResumeSeconds = parseFloat(params.get('t') || '0') || 0;
+
+  var bookId = null;
+  var chapterBase = null;
+  var allChapters = [];
+  var chunks = [];
+  var idx = -1;
+  var shown = false;
+  var chapterDuration = 0;
+  var currentSpeed = 1.0;
+  var scrubbing = false;
+  var chunkSpans = [];
+  var chunkLitCount = 0;
+  var readerReady = false; // guards zen/etc. from running before a chapter's ever been opened
+  var killed = false;
+  var loadToken = 0; // supersedes stale in-flight loads (rapid remote `load` commands)
+
+  var PAD_X = 26, PAD_TOP = 64, PAD_BOTTOM = 26, MAX_F = 68, ABS_MIN = 10;
+  var ZEN_TOP_BOTTOM_FRACTION = 0.05;
+  var ZEN_LEFT_FRACTION = 0.05;
+  var ZEN_RIGHT_FRACTION = 0.05;
+  var ZEN_GAP_FRACTION = 0.02;
+  var ZEN_DESKTOP_PADDING_V_FRACTION = 0.03;
+  var ZEN_DESKTOP_PADDING_H_FRACTION = 0.03;
+  var ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION = 0.05;
+  var ZEN_DESKTOP_GAP_FRACTION = 0.02;
+  var ZEN_DESKTOP_MIN_WIDTH = 800;
+  // Zen mode's own vh-based top padding (3-5% of screen height) is often
+  // thinner than the top icon row's real footprint (16px offset + 36px
+  // tall = 52px) at real desktop/tablet heights, especially once chrome
+  // is actually visible (desktop zen windowed, or a chrome-reveal tap/
+  // hover while zen is otherwise chrome-hidden) - the vertical text/image
+  // pair then renders flush against (or under) the icons. Whenever chrome
+  // is visible, the effective top inset is bumped up to at least this
+  // fixed px clearance (same value as the non-zen mode's own PAD_TOP,
+  // which exists for the identical reason) - see recalcZenColumns().
+  var ZEN_CHROME_TOP_CLEARANCE = PAD_TOP;
+
+  var zenActive = false;
+  var zenDesktopActive = false;
+  var zenImageList = [];
+  var zenCurrentImageUrl = null;
+  var zenColW = 0;
+  var zenImgColW = 0;
+  var zenRowH = 0;
+
+  function chapterNumber(base){
+    if (!base) return null; // reportState() can fire (a spurious audio event) before chapterBase is ever set
+    var m = base.match(/(\d+)$/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function humanize(base){
+    var n = chapterNumber(base);
+    return n !== null ? ('Chapter ' + n) : base;
+  }
+
+  function formatTime(s){
+    if (!isFinite(s) || s < 0) s = 0;
+    s = Math.round(s);
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
+    var mm = (h > 0 && m < 10) ? ('0' + m) : String(m);
+    var ss = sec < 10 ? ('0' + sec) : String(sec);
+    return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
+  }
+
+  async function fetchJson(url, fallback){
+    try {
+      var res = await fetch(url);
+      if (!res.ok) return fallback;
+      return await res.json();
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function goToLibrary(){
+    location.href = 'chapter.html?book=' + encodeURIComponent(bookId || urlBookId || '') + '&mode=player';
+  }
+  libraryBtn.addEventListener('click', goToLibrary);
+
+  // The real chapter number parsed from the filename, and the highest
+  // such number present in the folder - not folder-relative position/
+  // count, since chapters get copied over in batches and old ones
+  // deleted after reading, so the folder is rarely a contiguous run.
+  // Shared with reportState() so remote.html's chapter pill (driven by
+  // the WS state broadcast) reads identically to this page's own.
+  function chapterTotalCount(){
+    return allChapters.reduce(function(max, base){
+      var n = chapterNumber(base);
+      return (n !== null && n > max) ? n : max;
+    }, 0);
+  }
+
+  function updateChapterPill(){
+    var chapterIndex = chapterNumber(chapterBase) || 0;
+    var chapterTotal = chapterTotalCount();
+    var chunkPos = idx >= 0 ? (idx + 1) : 0;
+    chapterPill.textContent = 'Chapter: ' + chapterIndex + '/' + chapterTotal + ' Part: ' + chunkPos + '/' + chunks.length;
+    updateChapterNavButtons();
+  }
+
+  function updateChapterNavButtons(){
+    var pos = allChapters.indexOf(chapterBase);
+    prevChapterBtn.disabled = !(pos > 0);
+    nextChapterBtn.disabled = !(pos >= 0 && pos < allChapters.length - 1);
+    updatePlayerControlsFit();
+  }
+
+  function goPrevChapter(){
+    var pos = allChapters.indexOf(chapterBase);
+    if (pos > 0) openChapter(bookId, allChapters[pos - 1]);
+  }
+  function goNextChapter(){
+    var pos = allChapters.indexOf(chapterBase);
+    if (pos >= 0 && pos < allChapters.length - 1) openChapter(bookId, allChapters[pos + 1]);
+  }
+
+  var PLAYER_CONTROLS_BTN = 36;
+  var PLAYER_CONTROLS_GAP = 20;
+  function playerControlsRowWidth(n){
+    return n * PLAYER_CONTROLS_BTN + (n - 1) * PLAYER_CONTROLS_GAP;
+  }
+  var PLAYER_CONTROLS_MIN_VIEWPORT = 450;
+
+  function updatePlayerControlsFit(){
+    playerControls.classList.remove('hide-chapter', 'hide-part');
+    var available = playerControls.clientWidth;
+    if (playerControlsRowWidth(5) > available) {
+      playerControls.classList.add('hide-chapter');
+      if (playerControlsRowWidth(3) > available) playerControls.classList.add('hide-part');
+    }
+    playerControls.classList.toggle('hide-playpause', window.innerWidth < PLAYER_CONTROLS_MIN_VIEWPORT);
+  }
+  window.addEventListener('resize', updatePlayerControlsFit);
+
+  function fitFontSize(text, availW, availH){
+    measure.style.height = availH + 'px';
+    for(var f = MAX_F; f >= ABS_MIN; f -= 1){
+      measure.style.fontSize = f + 'px';
+      measure.textContent = text;
+      if(measure.scrollWidth <= availW) return f;
+    }
+    return ABS_MIN;
+  }
+
+  function recalcZenColumns(){
+    if (!zenActive) return;
+    var vw = window.innerWidth;
+    var vh = window.innerHeight;
+    var leftPad, rightPad, topBottomPad, gapW;
+    if (zenDesktopActive) {
+      var desktopPadFraction = document.fullscreenElement
+        ? ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION
+        : ZEN_DESKTOP_PADDING_H_FRACTION;
+      var desktopPadVFraction = document.fullscreenElement
+        ? ZEN_DESKTOP_FULLSCREEN_PADDING_FRACTION
+        : ZEN_DESKTOP_PADDING_V_FRACTION;
+      leftPad = vw * desktopPadFraction;
+      rightPad = leftPad;
+      topBottomPad = vh * desktopPadVFraction;
+      gapW = vw * ZEN_DESKTOP_GAP_FRACTION;
+    } else {
+      leftPad = vw * ZEN_LEFT_FRACTION;
+      rightPad = vw * ZEN_RIGHT_FRACTION;
+      topBottomPad = vh * ZEN_TOP_BOTTOM_FRACTION;
+      gapW = vw * ZEN_GAP_FRACTION;
+    }
+    // The top icon row (readerTopBar + the right-anchored icon column) is
+    // only actually hidden while chrome-hidden - whenever chrome is
+    // visible (desktop zen windowed, or a momentary reveal), the top
+    // inset needs to clear it regardless of what the vh-based fraction
+    // alone would give (see ZEN_CHROME_TOP_CLEARANCE above). Only the top
+    // edge has icons, so this is asymmetric - bottom keeps the plain
+    // fraction-based value.
+    var chromeVisible = !readerScreen.classList.contains('chrome-hidden');
+    var topPad = chromeVisible ? Math.max(topBottomPad, ZEN_CHROME_TOP_CLEARANCE) : topBottomPad;
+    frame.style.paddingTop = topPad + 'px';
+    frame.style.paddingBottom = topBottomPad + 'px';
+    frame.style.paddingLeft = leftPad + 'px';
+    frame.style.paddingRight = rightPad + 'px';
+
+    var innerW = frame.clientWidth - leftPad - rightPad;
+    var imgH = frame.clientHeight - topPad - topBottomPad;
+    var colW = (innerW - gapW) / 2;
+    zenImgColW = Math.max(20, colW);
+    zenColW = Math.max(40, colW);
+    zenRowH = imgH;
+    zenImageWrap.style.width = zenImgColW + 'px';
+    zenImageWrap.style.height = zenRowH + 'px';
+  }
+
+  // Clears the inline padding recalcZenColumns() sets above, so leaving
+  // zen falls back to the plain CSS rule (#frame { padding:64px 26px
+  // 26px }) instead of being stuck with zen's last computed values.
+  function resetZenFramePadding(){
+    frame.style.paddingTop = '';
+    frame.style.paddingBottom = '';
+    frame.style.paddingLeft = '';
+    frame.style.paddingRight = '';
+  }
+
+  // Re-derives the zen column layout and re-fits the current page against
+  // it - call this whenever chrome-hidden toggles while zen is active
+  // (play/pause on mobile, a chrome-reveal tap/hover on desktop
+  // fullscreen), since the top clearance above depends on chrome's
+  // current visibility, not just the viewport size.
+  function refreshZenLayout(){
+    if (!zenActive) return;
+    recalcZenColumns();
+    if (shown && idx >= 0) showPage(idx);
+    updateZenImageForTime(audio.currentTime || 0);
+  }
+
+  function getAvailableSpace(){
+    if (!zenActive || zenImageWrap.style.display === 'none') {
+      return {
+        w: frame.clientWidth - PAD_X * 2,
+        h: frame.clientHeight - PAD_TOP - PAD_BOTTOM
+      };
+    }
+    return { w: zenColW, h: zenRowH };
+  }
+
+  function showPage(i){
+    var chunk = chunks[i];
+    var space = getAvailableSpace();
+    var f = fitFontSize(chunk.text, space.w, space.h);
+    pageText.style.height = (zenActive && zenImageWrap.style.display !== 'none') ? (space.h + 'px') : '';
+    pageText.style.opacity = '0';
+    pageText.style.fontSize = f + 'px';
+
+    pageText.innerHTML = '';
+    chunkSpans = Array.from(chunk.text).map(function(ch){
+      var span = document.createElement('span');
+      span.textContent = ch;
+      pageText.appendChild(span);
+      return span;
+    });
+
+    pageText.style.display = 'none';
+    void pageText.offsetHeight;
+    pageText.style.display = '';
+
+    chunkLitCount = Math.min(PRELIT_COUNT, chunkSpans.length);
+    applyInitialSpanState();
+
+    requestAnimationFrame(function(){ pageText.style.opacity = '1'; });
+  }
+
+  function blankPage(){
+    pageText.style.opacity = '0';
+    pageText.innerHTML = '';
+    chunkSpans = [];
+    chunkLitCount = 0;
+  }
+
+  var zenMql = window.matchMedia('(orientation: landscape)');
+  var zenCoarsePointerMql = window.matchMedia('(pointer: coarse)');
+
+  // Real browser Fullscreen on touch devices: there is no native
+  // "immersive mode" bridge to call here (unlike the Android app) - this
+  // is a plain browser tab, so entering zen on a phone/tablet needs to
+  // request real Fullscreen itself to actually hide the browser's own
+  // address bar/chrome, not just this page's own icon row. Wrapped in a
+  // .catch() since requestFullscreen() can reject (e.g. not called from
+  // a direct user gesture, which a matchMedia 'change' listener isn't
+  // always treated as) - the .zen/.chrome-hidden classes still take
+  // effect either way, this is strictly an enhancement on top of them.
+  function requestMobileFullscreen(){
+    if (document.fullscreenElement) return;
+    var p = document.documentElement.requestFullscreen();
+    if (p && p.catch) p.catch(function(e){ console.log('mobile requestFullscreen failed: ' + e); });
+  }
+  function exitMobileFullscreenIfNeeded(){
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(function(){});
+    }
+  }
+
+  function applyZenState(){
+    if (!readerReady) return; // only while a chapter's open
+    var mobileMatch = zenMql.matches && zenCoarsePointerMql.matches;
+    var desktopMatch = !zenCoarsePointerMql.matches && window.innerWidth >= ZEN_DESKTOP_MIN_WIDTH;
+    var next = mobileMatch || desktopMatch;
+    var stateChanged = (next !== zenActive) || (desktopMatch !== zenDesktopActive);
+    if (!stateChanged && !zenActive) return;
+
+    var wasMobileZen = zenActive && !zenDesktopActive;
+    zenActive = next;
+    zenDesktopActive = desktopMatch;
+
+    if (stateChanged) {
+      readerScreen.classList.toggle('zen', zenActive);
+      readerScreen.classList.toggle('desktop', zenDesktopActive);
+      if (!zenActive) resetZenFramePadding();
+      if (mobileMatch !== wasMobileZen) {
+        readerScreen.classList.toggle('chrome-hidden', mobileMatch);
+        if (mobileMatch) requestMobileFullscreen(); else exitMobileFullscreenIfNeeded();
+      }
+    }
+
+    if (zenActive) recalcZenColumns();
+    if (shown && idx >= 0) showPage(idx);
+    updateZenImageForTime(audio.currentTime || 0);
+  }
+
+  if (zenMql.addEventListener) zenMql.addEventListener('change', applyZenState);
+  else zenMql.addListener(applyZenState);
+  window.addEventListener('resize', applyZenState);
+
+  function updateChromeForPlaybackState(){
+    if (!zenActive || zenDesktopActive) return;
+    readerScreen.classList.toggle('chrome-hidden', !audio.paused);
+    refreshZenLayout();
+  }
+
+  // Shared by the local forceZenBtn click AND a remote `toggleZen` command
+  // (remote.html only shows that icon while THIS device - a normal
+  // player, never a tv-player - is the active one) - same mechanism
+  // either way, since a remote trigger isn't a genuine user gesture the
+  // requestFullscreen() attempt inside may simply fail silently, same as
+  // any other non-gesture-triggered call already does elsewhere.
+  var zenForcedOn = false;
+  function toggleForceZen(){
+    zenForcedOn = !zenForcedOn;
+    forceZenBtn.classList.toggle('active', zenForcedOn);
+    if (!readerReady) return;
+    if (zenForcedOn) {
+      zenActive = true;
+      zenDesktopActive = false;
+      readerScreen.classList.add('zen');
+      readerScreen.classList.remove('desktop');
+      readerScreen.classList.add('chrome-hidden');
+      recalcZenColumns();
+      if (shown && idx >= 0) showPage(idx);
+      updateZenImageForTime(audio.currentTime || 0);
+      requestMobileFullscreen(); // most reliable when this IS a genuine user gesture (the local button click)
+      if (audio.paused) audio.play();
+    } else {
+      zenActive = null;
+      applyZenState();
+    }
+    reportState(true);
+  }
+  forceZenBtn.addEventListener('click', toggleForceZen);
+
+  function applyDesktopFullscreenChrome(){
+    if (zenCoarsePointerMql.matches) return;
+    var fs = !!document.fullscreenElement;
+    readerScreen.classList.toggle('chrome-hidden', fs);
+    readerScreen.classList.toggle('fullscreen', fs);
+    clearTimeout(desktopChromeHideTimer);
+    fullscreenToggleBtn.classList.toggle('active', fs);
+    refreshZenLayout();
+  }
+  document.addEventListener('fullscreenchange', applyDesktopFullscreenChrome);
+
+  fullscreenToggleBtn.addEventListener('click', function(){
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+    } else {
+      document.documentElement.requestFullscreen().catch(function(e){
+        console.log('requestFullscreen failed: ' + e);
+      });
+    }
+  });
+
+  var desktopChromeHideTimer = null;
+  var DESKTOP_CHROME_HOVER_ZONE = 0.8;
+  var DESKTOP_CHROME_TOP_ZONE = 0.1;
+  var DESKTOP_CHROME_HIDE_DELAY = 2500;
+
+  document.addEventListener('mousemove', function(e){
+    if (zenCoarsePointerMql.matches) return;
+    if (!document.fullscreenElement) return;
+    var inBottomZone = e.clientY >= window.innerHeight * DESKTOP_CHROME_HOVER_ZONE;
+    var inTopZone = e.clientY <= window.innerHeight * DESKTOP_CHROME_TOP_ZONE;
+    if (!inBottomZone && !inTopZone) return;
+    readerScreen.classList.remove('chrome-hidden');
+    refreshZenLayout();
+    clearTimeout(desktopChromeHideTimer);
+    desktopChromeHideTimer = setTimeout(function(){
+      readerScreen.classList.add('chrome-hidden');
+      refreshZenLayout();
+    }, DESKTOP_CHROME_HIDE_DELAY);
+  });
+
+  function updateZenImageForTime(t){
+    var url = null;
+    if (zenImageList.length === 0) {
+      url = (coverArt.style.display !== 'none' && coverArt.src) ? coverArt.src : null;
+    } else if (zenImageList.length === 1) {
+      url = zenImageList[0];
+    } else {
+      var frac = chapterDuration > 0 ? Math.min(0.999999, t / chapterDuration) : 0;
+      var segment = Math.max(0, Math.min(zenImageList.length - 1, Math.floor(frac * zenImageList.length)));
+      url = zenImageList[segment];
+    }
+    if (url && url !== zenCurrentImageUrl) {
+      zenCurrentImageUrl = url;
+      zenImage.src = url;
+    }
+    var shouldShow = zenActive && !!url;
+    if (shouldShow !== (zenImageWrap.style.display === 'flex')) {
+      zenImageWrap.style.display = shouldShow ? 'flex' : 'none';
+      if (shown && idx >= 0) showPage(idx);
+    }
+  }
+
+  var HIGHLIGHT_COLOR, FADE_BASE_COLOR;
+  var PRELIT_COUNT = 2;
+  var COMPLETE_AT_FRACTION = 0.95;
+
+  var textPreset = 'A';
+  try { textPreset = localStorage.getItem('textPreset') || 'A'; } catch(e){}
+
+  function applyInitialSpanState(){
+    var i;
+    if (textPreset === 'B') {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.color = FADE_BASE_COLOR;
+        chunkSpans[i].style.opacity = (i < PRELIT_COUNT) ? '1' : '0';
+      }
+    } else {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.opacity = '';
+        chunkSpans[i].style.color = (i < chunkLitCount) ? HIGHLIGHT_COLOR : '';
+      }
+    }
+  }
+
+  function updateChunkHighlight(t, chunk){
+    if (!shown || chunkSpans.length === 0) return;
+    var span = chunk.end - chunk.start;
+    var frac = span > 0 ? (t - chunk.start) / span : 1;
+    frac = Math.max(0, Math.min(1, frac));
+    var adjustedFrac = Math.min(1, frac / COMPLETE_AT_FRACTION);
+    var remaining = Math.max(0, chunkSpans.length - PRELIT_COUNT);
+
+    if (textPreset === 'B') {
+      var continuous = adjustedFrac * remaining;
+      for (var i = 0; i < remaining; i++) {
+        chunkSpans[PRELIT_COUNT + i].style.opacity = Math.max(0, Math.min(1, continuous - i));
+      }
+      return;
+    }
+
+    var litCount = Math.min(chunkSpans.length, PRELIT_COUNT + Math.floor(adjustedFrac * remaining));
+    if (litCount === chunkLitCount) return;
+    var j;
+    if (litCount > chunkLitCount) {
+      for (j = chunkLitCount; j < litCount; j++) chunkSpans[j].style.color = HIGHLIGHT_COLOR;
+    } else {
+      for (j = litCount; j < chunkLitCount; j++) chunkSpans[j].style.color = '';
+    }
+    chunkLitCount = litCount;
+  }
+
+  function setTextPreset(preset){
+    if (preset !== 'A' && preset !== 'B') return;
+    textPreset = preset;
+    try { localStorage.setItem('textPreset', preset); } catch(e){}
+    if (shown && chunkSpans.length) {
+      applyInitialSpanState();
+      updateChunkHighlight(audio.currentTime || 0, chunks[idx]);
+    }
+    reportState(true);
+  }
+
+  presetToggleBtn.addEventListener('click', function(){
+    setTextPreset(textPreset === 'A' ? 'B' : 'A');
+  });
+
+  function updateThemeColors(){
+    var cs = getComputedStyle(document.documentElement);
+    HIGHLIGHT_COLOR = cs.getPropertyValue('--read-text-highlight-a').trim();
+    FADE_BASE_COLOR = cs.getPropertyValue('--read-text-b').trim();
+  }
+
+  var theme = 'dark';
+  try { theme = localStorage.getItem('theme') || 'dark'; } catch(e){}
+
+  function applyTheme(){
+    document.documentElement.classList.toggle('light', theme === 'light');
+    updateThemeColors();
+    if (shown && chunkSpans.length) {
+      applyInitialSpanState();
+      updateChunkHighlight(audio.currentTime || 0, chunks[idx]);
+    }
+    reportState(true);
+  }
+
+  applyTheme();
+  themeToggleBtn.addEventListener('click', function(){
+    theme = theme === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('theme', theme); } catch(e){}
+    applyTheme();
+  });
+
+  function currentChunkIndex(t){
+    var i = 0;
+    for(var k = 0; k < chunks.length; k++){
+      if(chunks[k].start <= t) i = k; else break;
+    }
+    return i;
+  }
+
+  function renderTimeUI(t){
+    elapsedLabel.textContent = formatTime(t);
+    var pct = chapterDuration > 0 ? Math.max(0, Math.min(100, (t / chapterDuration) * 100)) : 0;
+    progressFill.style.width = pct + '%';
+    progressMarker.style.left = pct + '%';
+  }
+
+  function updateForTime(t){
+    if (scrubbing) return;
+    renderTimeUI(t);
+
+    if(chunks.length === 0) return;
+    var newIdx = currentChunkIndex(t);
+    var chunk = chunks[newIdx];
+    var active = t >= chunk.start && t < chunk.end;
+
+    if(newIdx !== idx || active !== shown){
+      idx = newIdx;
+      shown = active;
+      if(shown){
+        showPage(idx);
+      } else {
+        blankPage();
+      }
+      updateChapterPill();
+    }
+
+    updateChunkHighlight(t, chunk);
+    updateZenImageForTime(t);
+  }
+
+  function updatePlayPauseIcon(){
+    playIcon.style.display = audio.paused ? '' : 'none';
+    pauseIcon.style.display = audio.paused ? 'none' : '';
+    playPauseBtn.setAttribute('aria-label', audio.paused ? 'Play' : 'Pause');
+  }
+
+  var wakeLock = null;
+  async function acquireWakeLock(){
+    if (!('wakeLock' in navigator) || wakeLock) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', function(){ wakeLock = null; });
+    } catch (e) {
+      console.log('wakeLock request failed: ' + e);
+    }
+  }
+  function releaseWakeLock(){
+    if (!wakeLock) return;
+    wakeLock.release().catch(function(){});
+    wakeLock = null;
+  }
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible' && !audio.paused) acquireWakeLock();
+  });
+
+  audio.addEventListener('play', function(){ reportState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); acquireWakeLock(); });
+  audio.addEventListener('pause', function(){ reportState(true); updateChromeForPlaybackState(); updatePlayPauseIcon(); releaseWakeLock(); });
+
+  audio.addEventListener('timeupdate', function(){
+    var t = audio.currentTime;
+    if (isNaN(t)) return;
+    updateForTime(t);
+    reportState(false);
+  });
+
+  audio.addEventListener('ended', function(){
+    var currentIndex = allChapters.indexOf(chapterBase);
+    if (currentIndex >= 0 && currentIndex + 1 < allChapters.length) {
+      openChapter(bookId, allChapters[currentIndex + 1]);
+    }
+  });
+
+  function togglePlayPause(){
+    if(audio.paused) audio.play(); else audio.pause();
+  }
+
+  var SEEK_EPSILON = 0.05;
+
+  function seekToTime(targetTime){
+    if (chapterDuration > 0) targetTime = Math.max(0, Math.min(targetTime, chapterDuration));
+    else targetTime = Math.max(0, targetTime);
+    var wasPlaying = !audio.paused;
+    audio.currentTime = targetTime;
+    if (wasPlaying) audio.play();
+    updateForTime(targetTime);
+    reportState(true);
+  }
+
+  function seekToChunk(target){
+    target = Math.max(0, Math.min(chunks.length - 1, target));
+    seekToTime(chunks[target].start + SEEK_EPSILON);
+  }
+
+  function goNext(){ if (chunks.length) seekToChunk(idx + 1); }
+  function goPrev(){ if (chunks.length) seekToChunk(Math.max(0, idx - 1)); }
+
+  var PREV_CHAPTER_DOUBLE_MS = 1500;
+  var lastPrevChapterClick = 0;
+  prevChapterBtn.addEventListener('click', function(){
+    var now = Date.now();
+    if (now - lastPrevChapterClick < PREV_CHAPTER_DOUBLE_MS) {
+      lastPrevChapterClick = 0;
+      goPrevChapter();
+    } else {
+      lastPrevChapterClick = now;
+      seekToTime(0);
+    }
+  });
+  prevPartBtn.addEventListener('click', goPrev);
+  playPauseBtn.addEventListener('click', togglePlayPause);
+  nextPartBtn.addEventListener('click', goNext);
+  nextChapterBtn.addEventListener('click', goNextChapter);
+
+  // --- Gestures: single tap reveals chrome, double-tap play/pause,
+  // triple-tap back to chapter.html, edge-swipe prev/next part, swipe up
+  // to bookmark. See _legacy-index.html for the full design rationale.
+  var EDGE_ZONE = 32;
+  var SWIPE_MIN_DX = 48;
+  var TAP_MAX_MOVE = 12;
+  var TAP_GAP_MS = 300;
+  var VSWIPE_MIN_DY = 64;
+
+  var pointerStart = null;
+  var tapCount = 0;
+  var tapTimer = null;
+
+  function registerTap(){
+    tapCount++;
+    if (tapTimer) clearTimeout(tapTimer);
+    tapTimer = setTimeout(function(){
+      if (tapCount === 1) {
+        toggleChromeFromTap();
+      } else if (tapCount === 2) {
+        togglePlayPause();
+      } else if (tapCount >= 3) {
+        goToLibrary();
+      }
+      tapCount = 0;
+    }, TAP_GAP_MS);
+  }
+
+  function toggleChromeFromTap(){
+    if (zenCoarsePointerMql.matches) {
+      if (!zenActive) return;
+      readerScreen.classList.toggle('chrome-hidden');
+      refreshZenLayout();
+    } else {
+      if (!document.fullscreenElement) return;
+      readerScreen.classList.toggle('chrome-hidden');
+      refreshZenLayout();
+      clearTimeout(desktopChromeHideTimer);
+      if (readerScreen.classList.contains('chrome-hidden')) return;
+      desktopChromeHideTimer = setTimeout(function(){
+        readerScreen.classList.add('chrome-hidden');
+        refreshZenLayout();
+      }, DESKTOP_CHROME_HIDE_DELAY);
+    }
+  }
+
+  frame.addEventListener('pointerdown', function(e){
+    pointerStart = { x: e.clientX, y: e.clientY };
+  });
+
+  frame.addEventListener('pointerup', function(e){
+    if (!pointerStart) return;
+    var dx = e.clientX - pointerStart.x;
+    var dy = e.clientY - pointerStart.y;
+    var rect = frame.getBoundingClientRect();
+    var startedNearLeft = (pointerStart.x - rect.left) <= EDGE_ZONE;
+    var startedNearRight = (rect.right - pointerStart.x) <= EDGE_ZONE;
+    var horizontal = Math.abs(dx) > Math.abs(dy);
+    pointerStart = null;
+
+    if (horizontal && dx >= SWIPE_MIN_DX && startedNearLeft) {
+      goNext();
+    } else if (horizontal && -dx >= SWIPE_MIN_DX && startedNearRight) {
+      goPrev();
+    } else if (!horizontal && -dy >= VSWIPE_MIN_DY) {
+      saveBookmarkGesture();
+    } else if (Math.abs(dx) < TAP_MAX_MOVE && Math.abs(dy) < TAP_MAX_MOVE) {
+      registerTap();
+    }
+  });
+
+  async function saveBookmarkGesture(){
+    if (!bookId || !chapterBase) return;
+    var t = audio.currentTime || 0;
+    try {
+      var res = await fetch('/api/books/' + bookId + '/bookmarks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapterBase: chapterBase, positionSeconds: t })
+      });
+      if (!res.ok) return;
+      var json = await res.json();
+      if (json && json.label) showBookmarkToast(json.label);
+    } catch (e) {}
+  }
+
+  var bookmarkToastTimer = null;
+  function showBookmarkToast(text){
+    bookmarkToast.textContent = text;
+    bookmarkToast.classList.add('show');
+    if (bookmarkToastTimer) clearTimeout(bookmarkToastTimer);
+    bookmarkToastTimer = setTimeout(function(){ bookmarkToast.classList.remove('show'); }, 1600);
+  }
+  bookmarkBtn.addEventListener('click', saveBookmarkGesture);
+
+  function scrubTargetFromEvent(e){
+    var rect = progressTrack.getBoundingClientRect();
+    var frac = (e.clientX - rect.left) / rect.width;
+    frac = Math.max(0, Math.min(1, frac));
+    return frac * (chapterDuration || 0);
+  }
+
+  progressTrack.addEventListener('pointerdown', function(e){
+    scrubbing = true;
+    try { progressTrack.setPointerCapture(e.pointerId); } catch(err){}
+    renderTimeUI(scrubTargetFromEvent(e));
+  });
+  progressTrack.addEventListener('pointermove', function(e){
+    if (scrubbing) renderTimeUI(scrubTargetFromEvent(e));
+  });
+  progressTrack.addEventListener('pointerup', function(e){
+    if (!scrubbing) return;
+    scrubbing = false;
+    seekToTime(scrubTargetFromEvent(e));
+  });
+
+  function setSpeed(v){
+    if (!isFinite(v)) return;
+    v = Math.max(0.25, Math.min(8, Math.round(v * 100) / 100));
+    currentSpeed = v;
+    audio.playbackRate = v;
+    speedLabel.textContent = v.toFixed(2) + 'x';
+    speedValue.textContent = v.toFixed(2) + 'x';
+    speedSlider.value = v;
+    reportState(true);
+  }
+
+  speedPill.addEventListener('click', function(){
+    speedOverlay.style.display = (speedOverlay.style.display === 'flex') ? 'none' : 'flex';
+  });
+  speedOverlay.addEventListener('click', function(e){
+    if (e.target === speedOverlay) speedOverlay.style.display = 'none';
+  });
+  speedDown.addEventListener('click', function(){ setSpeed(currentSpeed - 0.01); });
+  speedUp.addEventListener('click', function(){ setSpeed(currentSpeed + 0.01); });
+  speedSlider.addEventListener('input', function(){ setSpeed(parseFloat(speedSlider.value)); });
+  Array.prototype.forEach.call(document.querySelectorAll('#speedPresets button'), function(btn){
+    btn.addEventListener('click', function(){ setSpeed(parseFloat(btn.getAttribute('data-speed'))); });
+  });
+
+  var VOLUME_STEP = 5;
+  var volumeLevel = Math.round((audio.volume || 1) * 100 / VOLUME_STEP) * VOLUME_STEP;
+  var muted = false;
+  var volumeBeforeMute = volumeLevel;
+
+  function renderVolumeLevel(){
+    volumeLevelPill.textContent = volumeLevel;
+    audio.volume = volumeLevel / 100;
+  }
+  renderVolumeLevel();
+
+  function setVolumeLevel(v){
+    volumeLevel = Math.max(0, Math.min(100, v));
+    renderVolumeLevel();
+  }
+
+  function setMuted(v){
+    muted = v;
+    volumeIconNormal.style.display = muted ? 'none' : '';
+    volumeIconMuted.style.display = muted ? '' : 'none';
+  }
+
+  volumeToggleBtn.addEventListener('click', function(e){
+    e.stopPropagation();
+    volumePopup.classList.toggle('show');
+  });
+
+  var VOLUME_REPEAT_DELAY = 400;
+  var VOLUME_REPEAT_INTERVAL = 120;
+  var volumeRepeatTimer = null;
+
+  function startVolumeRepeat(step){
+    if (step > 0 && muted) setMuted(false);
+    setVolumeLevel(volumeLevel + step);
+    volumeRepeatTimer = setTimeout(function repeat(){
+      setVolumeLevel(volumeLevel + step);
+      volumeRepeatTimer = setTimeout(repeat, VOLUME_REPEAT_INTERVAL);
+    }, VOLUME_REPEAT_DELAY);
+  }
+  function stopVolumeRepeat(){
+    clearTimeout(volumeRepeatTimer);
+    volumeRepeatTimer = null;
+  }
+  volumeUpBtn.addEventListener('pointerdown', function(e){ e.preventDefault(); startVolumeRepeat(VOLUME_STEP); });
+  volumeDownBtn.addEventListener('pointerdown', function(e){ e.preventDefault(); startVolumeRepeat(-VOLUME_STEP); });
+  window.addEventListener('pointerup', stopVolumeRepeat);
+  window.addEventListener('pointercancel', stopVolumeRepeat);
+
+  muteBtn.addEventListener('click', function(e){
+    e.stopPropagation();
+    if (muted) {
+      setMuted(false);
+      setVolumeLevel(volumeBeforeMute);
+    } else {
+      volumeBeforeMute = volumeLevel;
+      setMuted(true);
+      setVolumeLevel(0);
+    }
+    volumePopup.classList.remove('show');
+  });
+
+  function setupMarquee(el, text){
+    el.classList.remove('scrolling');
+    el.innerHTML = '';
+    if (!text) return;
+
+    var inner = document.createElement('span');
+    inner.className = 'marqueeInner';
+    var first = document.createElement('span');
+    first.textContent = text;
+    inner.appendChild(first);
+    var gap = document.createElement('span');
+    gap.className = 'marqueeGap';
+    inner.appendChild(gap);
+    var second = document.createElement('span');
+    second.textContent = text;
+    inner.appendChild(second);
+    el.appendChild(inner);
+
+    requestAnimationFrame(function(){
+      if (inner.scrollWidth > el.clientWidth * 1.9) {
+        var singleWidth = inner.scrollWidth / 2;
+        var duration = Math.max(6, singleWidth / 40);
+        inner.style.animationDuration = duration + 's';
+        el.classList.add('scrolling');
+      } else {
+        second.remove();
+        gap.remove();
+      }
+    });
+  }
+
+  function applyMetadata(meta, id, base){
+    var title = (meta.title || '').trim();
+    var author = (meta.artist || '').trim();
+    var album = (meta.album || '').trim();
+    if (author) {
+      chapterTitleEl.textContent = author;
+    } else if (title) {
+      chapterTitleEl.textContent = title;
+    }
+    setupMarquee(authorTitleEl, album);
+
+    if (meta.hasCover) {
+      coverArt.src = '/api/books/' + id + '/chapters/' + base + '/cover';
+      coverArt.style.display = 'block';
+      coverPlaceholder.style.display = 'none';
+    } else {
+      coverArt.style.display = 'none';
+      coverPlaceholder.style.display = 'flex';
+    }
+  }
+
+  // --- Loading: direct REST, mirroring tv-player.html's pattern exactly -
+  // no "prepare"/cache-copy step exists here (unlike the Android app),
+  // since a real Range-serving file server needs none of that.
+  async function ensureChapterList(id){
+    if (bookId === id && allChapters.length) return;
+    var data = await fetchJson('/api/books/' + id + '/chapters', { chapters: [] });
+    bookId = id;
+    allChapters = data.chapters || [];
+  }
+
+  async function openChapter(id, base, resumeSeconds){
+    var myToken = ++loadToken;
+    await ensureChapterList(id);
+    if (myToken !== loadToken) return;
+
+    chapterBase = base;
+    idx = -1;
+    shown = false;
+    audio.pause();
+    chunks = [];
+    chapterDuration = 0;
+    elapsedLabel.textContent = '0:00';
+    totalLabel.textContent = '0:00';
+    renderTimeUI(0);
+
+    chapterTitleEl.textContent = humanize(base);
+    authorTitleEl.innerHTML = '';
+    coverArt.style.display = 'none';
+    coverPlaceholder.style.display = 'flex';
+    updateChapterPill();
+
+    readerReady = true;
+    readerScreen.style.display = 'flex';
+    pageText.style.display = 'none';
+    loadingOverlay.style.display = 'block';
+
+    // If the caller didn't already know a resume time (goNextChapter/
+    // goPrevChapter/the 'ended' auto-advance handler all just open the
+    // neighboring chapter with no third argument), look up that specific
+    // chapter's own saved position instead of always restarting at 0 -
+    // every chapter remembers its own progress server-side. A caller that
+    // DOES pass an explicit number (the initial URL load, or a remote
+    // `load` command) is trusted as-is, including an explicit 0.
+    var needsProgressLookup = (resumeSeconds === undefined);
+
+    var syncPromise = fetchJson('/api/books/' + id + '/chapters/' + base + '/sync', { chunks: [] });
+    var metaPromise = fetchJson('/api/books/' + id + '/chapters/' + base + '/metadata', {});
+    var imagesPromise = fetchJson('/api/books/' + id + '/chapters/' + base + '/images', { images: [] });
+    var progressPromise = needsProgressLookup
+      ? fetchJson('/api/books/' + id + '/chapters/' + base + '/progress', { positionSeconds: 0 })
+      : Promise.resolve(null);
+    var results = await Promise.all([syncPromise, metaPromise, imagesPromise, progressPromise]);
+    if (myToken !== loadToken) return;
+    if (needsProgressLookup) resumeSeconds = (results[3] && results[3].positionSeconds) || 0;
+
+    chunks = results[0].chunks || [];
+    chapterDuration = chunks.length ? chunks[chunks.length - 1].end : 0;
+    totalLabel.textContent = formatTime(chapterDuration);
+    updateChapterPill();
+
+    var meta = results[1] || {};
+    applyMetadata(meta, id, base);
+
+    zenImageList = [];
+    zenCurrentImageUrl = null;
+    (results[2].images || []).forEach(function(name){
+      zenImageList.push('/api/books/' + id + '/images/' + name);
+    });
+    if (zenImageList.length === 0 && meta.hasCover) {
+      zenImageList.push('/api/books/' + id + '/chapters/' + base + '/cover');
+    }
+
+    loadingOverlay.style.display = 'none';
+    pageText.style.display = 'flex';
+
+    applyZenState();
+
+    audio.src = '/api/books/' + id + '/chapters/' + base + '/audio';
+    audio.playbackRate = currentSpeed;
+    if (resumeSeconds) {
+      seekToTime(resumeSeconds);
+      audio.play().catch(function(e){ console.log('resume autoplay failed: ' + e); });
+    } else {
+      updateForTime(0);
+      audio.play().catch(function(e){ console.log('autoplay failed: ' + e); });
+    }
+    reportState(true);
+  }
+
+  // --- Sync: registers as role:'player' on connect, which is itself what
+  // claims active-device status (see server/src/sync.js's claimActive()) -
+  // no separate self-load round-trip needed, unlike the old single-active-
+  // device design. A `killed` command (this device displaced by a newer
+  // normal player or tv-player) shows a plain "Session Ended" screen with
+  // no auto-recovery, per the rebuild spec.
+  var playerDeviceId;
+  try {
+    playerDeviceId = localStorage.getItem('playerDeviceId');
+    if (!playerDeviceId) { playerDeviceId = crypto.randomUUID(); localStorage.setItem('playerDeviceId', playerDeviceId); }
+  } catch (e) { playerDeviceId = 'player-' + Math.random().toString(36).slice(2); }
+
+  var playerDeviceKind = matchMedia('(pointer: coarse)').matches
+    ? (window.innerWidth < 768 ? 'phone' : 'tablet') : 'desktop';
+  var playerDeviceName = params.get('name') ||
+    ('Player (' + playerDeviceKind.charAt(0).toUpperCase() + playerDeviceKind.slice(1) + ')');
+
+  var ws = null;
+  function wsSend(payload){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  }
+
+  function persistLastPosition(t){
+    if (!bookId || !chapterBase) return;
+    fetch('/api/books/' + bookId + '/last-position', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chapterBase: chapterBase, positionSeconds: t })
+    }).catch(function(){});
+  }
+
+  var lastReportedSecond = -1;
+  function reportState(force){
+    var t = audio.currentTime || 0;
+    var sec = Math.floor(t);
+    if (!force && sec === lastReportedSecond) return;
+    lastReportedSecond = sec;
+    persistLastPosition(t);
+    wsSend({
+      type: 'state',
+      bookId: bookId, chapterBase: chapterBase,
+      position: t, duration: chapterDuration,
+      paused: audio.paused,
+      preset: textPreset, theme: theme, zenActive: !!zenActive, speed: currentSpeed,
+      chapterIndex: chapterNumber(chapterBase) || 0, totalChapters: chapterTotalCount(),
+      partIndex: idx + 1, totalParts: chunks.length
+    });
+  }
+
+  function showSessionEndedScreen(){
+    killed = true;
+    loadToken++;
+    audio.pause();
+    try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+    readerScreen.style.display = 'none';
+    sessionEndedScreen.style.display = 'flex';
+  }
+
+  function handleSyncCommand(msg){
+    if (killed) return; // no recovery once killed, per spec
+    switch (msg.action) {
+      case 'load': openChapter(msg.bookId, msg.chapterBase, msg.positionSeconds || 0); break;
+      case 'killed': showSessionEndedScreen(); break;
+      case 'playPause': togglePlayPause(); break;
+      case 'seek': seekToTime(msg.value || 0); break;
+      case 'next': goNext(); break;
+      case 'prev': goPrev(); break;
+      case 'nextChapter': goNextChapter(); break;
+      case 'prevChapter': goPrevChapter(); break;
+      case 'setPreset': setTextPreset(msg.value); break;
+      case 'setTheme':
+        if ((msg.value === 'light' || msg.value === 'dark') && msg.value !== theme) themeToggleBtn.click();
+        break;
+      case 'setVolume': setVolumeLevel(Math.round((msg.value || 0) * 100)); break;
+      case 'toggleZen': toggleForceZen(); break;
+      case 'setSpeed': setSpeed(msg.value); break;
+    }
+  }
+
+  function connectSync(){
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.addEventListener('open', function(){
+      wsSend({ type: 'hello', role: 'player', deviceId: playerDeviceId, deviceName: playerDeviceName, deviceKind: playerDeviceKind });
+    });
+    ws.addEventListener('message', function(ev){
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'command') handleSyncCommand(msg);
+    });
+    ws.addEventListener('close', function(){ if (!killed) setTimeout(connectSync, 2000); });
+    ws.addEventListener('error', function(){ try { ws.close(); } catch (e) {} });
+  }
+
+  if (urlBookId && urlChapterBase) {
+    openChapter(urlBookId, urlChapterBase, urlResumeSeconds);
+  } else {
+    alert('Missing book/chapter - returning to the library.');
+    location.href = 'library.html?mode=player';
+  }
+  connectSync();
+})();
+</script>
+</body>
+</html>

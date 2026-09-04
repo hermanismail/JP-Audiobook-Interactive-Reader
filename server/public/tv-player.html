@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230b0b0d'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Roboto, Arial, sans-serif' font-weight='700' font-size='20' fill='%23e08a3c'%3ES%3C/text%3E%3C/svg%3E">
+<title>SHAMA TV Player</title>
+<!--
+  Runs inside the Android TV app's WebView (see the :tv Gradle module) - a
+  derived copy of index.html's zen-mode reveal engine, not a shared module,
+  same pattern as bridge-shim.js and the now-shelved cast-receiver.html: same
+  engine, different host, duplicated deliberately.
+
+  Unlike cast-receiver.html, there is NO Google Cast/CAF layer at all here -
+  this page owns a real local <audio> element directly (the same primitive
+  the existing Android phone app already plays back successfully), and is
+  driven entirely by commands arriving over a plain WebSocket to /ws (see
+  server/src/sync.js). This page has zero on-screen UI beyond the reveal
+  itself - no icons, no gestures, no responsive breakpoints - it is always
+  in a fixed, permanent "zen mode" and only ever reacts to remote commands
+  from server/public/remote.html (or any other connected controller).
+-->
+<style>
+  :root {
+    --bg:#0b0b0d; --ink:#e8e6ea; --muted:#9b93b0;
+    --read-text-base:#d6d6d6; --read-text-highlight-a:#F6CAC0; --read-text-b:#d6d6d6;
+  }
+  :root.light {
+    --bg:#e5decf; --ink:#000000; --muted:#7a6f58;
+    --read-text-base:#d0d0d0; --read-text-highlight-a:#000000; --read-text-b:#000000;
+  }
+  html, body { margin:0; height:100%; background:var(--bg); overflow:hidden; }
+  #idleScreen {
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:12px;
+    font-family:"Roboto","Arial",sans-serif; color:var(--ink);
+  }
+  #idleTitle { font-size:6vw; font-weight:700; letter-spacing:0.1em; }
+  #idleSubtitle { font-size:2vw; color:var(--muted); }
+  /* Browsers block audio.play() unless it's the direct result of a real
+     user gesture on this page - this device sits passively on a TV,
+     driven entirely by remote commands, so without an explicit gesture
+     here first, every remote-triggered play (the initial `load`, and any
+     later playPause) gets silently rejected: the reading UI still shows
+     the right chunk/position (that part doesn't depend on audio actually
+     running), but nothing plays and remote's progress bar just stops
+     advancing. One tap here unlocks playback for the rest of this page's
+     session - required again after every reload, since the browser
+     doesn't persist the unlock across navigations. */
+  #tapToStartOverlay {
+    position:absolute; inset:0; z-index:50; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:12px; text-align:center;
+    background:rgba(0,0,0,0.7); color:#fff; font-family:"Roboto","Arial",sans-serif;
+    cursor:pointer;
+  }
+  #tapToStartOverlay .tapTitle { font-size:3vw; font-weight:700; letter-spacing:0.05em; }
+  #tapToStartOverlay .tapHint { font-size:1.4vw; color:#c9c6cf; }
+  #frame {
+    display:none; box-sizing:border-box; height:100%; width:100%; position:absolute; inset:0;
+    align-items:center; justify-content:flex-end; padding:5vh 5vw; gap:2vw;
+  }
+  #pageText {
+    writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500;
+    opacity:1; transition:opacity 0.3s; color:var(--read-text-base);
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    overflow-wrap:anywhere;
+  }
+  #pageText span { transition:color 0.2s ease, opacity 0.15s linear; }
+  #measure {
+    position:absolute; visibility:hidden; top:-9999px; left:-9999px;
+    writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500;
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    white-space:normal; overflow-wrap:anywhere;
+  }
+  #zenImageWrap { display:none; align-items:center; flex-shrink:0; }
+  #zenImage {
+    height:100%; width:100%; object-fit:contain; border-radius:8px;
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat; -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect; mask-repeat: no-repeat; mask-size: 100% 100%;
+  }
+</style>
+</head>
+<body>
+  <div id="idleScreen">
+    <div id="idleTitle">SHAMA</div>
+    <div id="idleSubtitle">Ready to Read</div>
+  </div>
+  <div id="tapToStartOverlay">
+    <div class="tapTitle">Tap to Enable Playback</div>
+    <div class="tapHint">Required once per session before remote playback will work</div>
+  </div>
+  <div id="frame">
+    <div id="pageText"></div>
+    <div id="measure"></div>
+    <div id="zenImageWrap"><img id="zenImage"></div>
+  </div>
+  <audio id="audio" preload="auto"></audio>
+
+<script>
+(function(){
+  var idleScreen = document.getElementById('idleScreen');
+  var frame = document.getElementById('frame');
+  var pageText = document.getElementById('pageText');
+  var measure = document.getElementById('measure');
+  var zenImageWrap = document.getElementById('zenImageWrap');
+  var zenImage = document.getElementById('zenImage');
+  var audio = document.getElementById('audio');
+  var tapToStartOverlay = document.getElementById('tapToStartOverlay');
+
+  // See the CSS comment on #tapToStartOverlay - one real tap on this page
+  // is required before the browser will allow any audio.play() call this
+  // page makes on its own (every play here is remote-triggered, never a
+  // direct gesture). Also immediately resumes playback if a chapter was
+  // already loaded and stuck paused waiting for this.
+  tapToStartOverlay.addEventListener('click', function(){
+    tapToStartOverlay.style.display = 'none';
+    if (audio.paused && audio.src) {
+      var p = audio.play();
+      if (p && p.catch) p.catch(function(e){ console.log('unlock play failed: ' + e); });
+    }
+  });
+
+  var deviceName = (new URLSearchParams(location.search).get('name')) || 'Living Room TV';
+  var deviceId;
+  try {
+    deviceId = localStorage.getItem('tvDeviceId');
+    if (!deviceId) {
+      deviceId = crypto.randomUUID();
+      localStorage.setItem('tvDeviceId', deviceId);
+    }
+  } catch (e) {
+    deviceId = 'tv-' + Math.random().toString(36).slice(2);
+  }
+
+  var MAX_F = 68, ABS_MIN = 10;
+  var PRELIT_COUNT = 2;
+  var COMPLETE_AT_FRACTION = 0.95;
+  var HIGHLIGHT_COLOR, FADE_BASE_COLOR;
+
+  var bookId = null, allChapters = [], chapterBase = null;
+  var chunks = [], idx = -1, shown = false, chunkSpans = [], chunkLitCount = 0;
+  var chapterDuration = 0, textPreset = 'A';
+  var zenImageList = [], zenCurrentImageUrl = null;
+  var zenColW = 0, zenRowH = 0;
+
+  function updateThemeColors(){
+    var cs = getComputedStyle(document.documentElement);
+    HIGHLIGHT_COLOR = cs.getPropertyValue('--read-text-highlight-a').trim();
+    FADE_BASE_COLOR = cs.getPropertyValue('--read-text-b').trim();
+  }
+  function applyTheme(theme){
+    document.documentElement.classList.toggle('light', theme === 'light');
+    updateThemeColors();
+    if (shown && chunkSpans.length) applyInitialSpanState();
+  }
+  applyTheme('dark');
+
+  function fitFontSize(text, availW, availH){
+    measure.style.height = availH + 'px';
+    for (var f = MAX_F; f >= ABS_MIN; f -= 1) {
+      measure.style.fontSize = f + 'px';
+      measure.textContent = text;
+      if (measure.scrollWidth <= availW) return f;
+    }
+    return ABS_MIN;
+  }
+
+  // Fixed padding always applied (this page is permanently "zen") - split
+  // evenly between text/image, recomputed only on resize, same reasoning
+  // as index.html's recalcZenColumns(): a differently-shaped image should
+  // letterbox within an unchanged box, not resize the columns themselves.
+  function recalcColumns(){
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var padH = vw * 0.05, padV = vh * 0.05, gapW = vw * 0.02;
+    var innerW = vw - padH * 2;
+    zenRowH = vh - padV * 2;
+    var colW = (innerW - gapW) / 2;
+    zenColW = Math.max(40, colW);
+    zenImageWrap.style.width = Math.max(20, colW) + 'px';
+    zenImageWrap.style.height = zenRowH + 'px';
+  }
+  window.addEventListener('resize', recalcColumns);
+  recalcColumns();
+
+  function getAvailableSpace(){ return { w: zenColW, h: zenRowH }; }
+
+  function showPage(i){
+    var chunk = chunks[i];
+    if (!chunk) return;
+    var space = getAvailableSpace();
+    var f = fitFontSize(chunk.text, space.w, space.h);
+    pageText.style.height = space.h + 'px';
+    pageText.style.fontSize = f + 'px';
+    pageText.style.opacity = '0';
+    pageText.innerHTML = '';
+    chunkSpans = Array.from(chunk.text).map(function(ch){
+      var span = document.createElement('span');
+      span.textContent = ch;
+      pageText.appendChild(span);
+      return span;
+    });
+    pageText.style.display = 'none';
+    void pageText.offsetHeight;
+    pageText.style.display = '';
+    chunkLitCount = Math.min(PRELIT_COUNT, chunkSpans.length);
+    applyInitialSpanState();
+    requestAnimationFrame(function(){ pageText.style.opacity = '1'; });
+  }
+
+  function blankPage(){
+    pageText.style.opacity = '0';
+    pageText.innerHTML = '';
+    chunkSpans = [];
+    chunkLitCount = 0;
+  }
+
+  function applyInitialSpanState(){
+    var i;
+    if (textPreset === 'B') {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.color = FADE_BASE_COLOR;
+        chunkSpans[i].style.opacity = (i < PRELIT_COUNT) ? '1' : '0';
+      }
+    } else {
+      for (i = 0; i < chunkSpans.length; i++) {
+        chunkSpans[i].style.opacity = '';
+        chunkSpans[i].style.color = (i < chunkLitCount) ? HIGHLIGHT_COLOR : '';
+      }
+    }
+  }
+
+  function updateChunkHighlight(t, chunk){
+    if (!shown || chunkSpans.length === 0) return;
+    var span = chunk.end - chunk.start;
+    var frac = span > 0 ? (t - chunk.start) / span : 1;
+    frac = Math.max(0, Math.min(1, frac));
+    var adjustedFrac = Math.min(1, frac / COMPLETE_AT_FRACTION);
+    var remaining = Math.max(0, chunkSpans.length - PRELIT_COUNT);
+
+    if (textPreset === 'B') {
+      var continuous = adjustedFrac * remaining;
+      for (var i = 0; i < remaining; i++) {
+        chunkSpans[PRELIT_COUNT + i].style.opacity = Math.max(0, Math.min(1, continuous - i));
+      }
+      return;
+    }
+    var litCount = Math.min(chunkSpans.length, PRELIT_COUNT + Math.floor(adjustedFrac * remaining));
+    if (litCount === chunkLitCount) return;
+    var j;
+    if (litCount > chunkLitCount) {
+      for (j = chunkLitCount; j < litCount; j++) chunkSpans[j].style.color = HIGHLIGHT_COLOR;
+    } else {
+      for (j = litCount; j < chunkLitCount; j++) chunkSpans[j].style.color = '';
+    }
+    chunkLitCount = litCount;
+  }
+
+  function currentChunkIndex(t){
+    var i = 0;
+    for (var k = 0; k < chunks.length; k++) {
+      if (chunks[k].start <= t) i = k; else break;
+    }
+    return i;
+  }
+
+  function updateZenImageForTime(t){
+    var url = null;
+    if (zenImageList.length === 1) {
+      url = zenImageList[0];
+    } else if (zenImageList.length > 1) {
+      var frac = chapterDuration > 0 ? Math.min(0.999999, t / chapterDuration) : 0;
+      var segment = Math.max(0, Math.min(zenImageList.length - 1, Math.floor(frac * zenImageList.length)));
+      url = zenImageList[segment];
+    }
+    if (url && url !== zenCurrentImageUrl) {
+      zenCurrentImageUrl = url;
+      zenImage.src = url;
+    }
+    var shouldShow = !!url;
+    if (shouldShow !== (zenImageWrap.style.display === 'flex')) {
+      zenImageWrap.style.display = shouldShow ? 'flex' : 'none';
+    }
+  }
+
+  function updateForTime(t){
+    if (chunks.length === 0) return;
+    var newIdx = currentChunkIndex(t);
+    var chunk = chunks[newIdx];
+    var active = t >= chunk.start && t < chunk.end;
+    if (newIdx !== idx || active !== shown) {
+      idx = newIdx;
+      shown = active;
+      if (shown) showPage(idx); else blankPage();
+    }
+    updateChunkHighlight(t, chunk);
+    updateZenImageForTime(t);
+  }
+
+  var SEEK_EPSILON = 0.05;
+  function seekToTime(targetTime){
+    if (chapterDuration > 0) targetTime = Math.max(0, Math.min(targetTime, chapterDuration));
+    else targetTime = Math.max(0, targetTime);
+    var wasPlaying = !audio.paused;
+    audio.currentTime = targetTime;
+    if (wasPlaying) audio.play();
+    updateForTime(targetTime);
+    reportState(true);
+  }
+  function seekToChunk(target){
+    target = Math.max(0, Math.min(chunks.length - 1, target));
+    seekToTime(chunks[target].start + SEEK_EPSILON);
+  }
+  function goNext(){ if (chunks.length) seekToChunk(idx + 1); }
+  function goPrev(){ if (chunks.length) seekToChunk(Math.max(0, idx - 1)); }
+
+  async function fetchJson(url, fallback){
+    try {
+      var res = await fetch(url);
+      if (!res.ok) return fallback;
+      return await res.json();
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  async function ensureChapterList(id){
+    if (bookId === id && allChapters.length) return;
+    var data = await fetchJson('/api/books/' + id + '/chapters', { chapters: [] });
+    bookId = id;
+    allChapters = data.chapters || [];
+  }
+
+  async function prepareChapter(id, base){
+    chunks = []; idx = -1; shown = false;
+    zenImageList = []; zenCurrentImageUrl = null;
+    zenImageWrap.style.display = 'none';
+    blankPage();
+
+    var syncPromise = fetchJson('/api/books/' + id + '/chapters/' + base + '/sync', { chunks: [] });
+    var imagesPromise = fetchJson('/api/books/' + id + '/chapters/' + base + '/images', { images: [] });
+    var results = await Promise.all([syncPromise, imagesPromise]);
+    chunks = results[0].chunks || [];
+    chapterDuration = chunks.length ? chunks[chunks.length - 1].end : 0;
+    (results[1].images || []).forEach(function(name){
+      zenImageList.push('/api/books/' + id + '/images/' + name);
+    });
+    if (zenImageList.length === 0) {
+      zenImageList.push('/api/books/' + id + '/chapters/' + base + '/cover');
+    }
+  }
+
+  // Guards against overlapping loads (rapid chapter switches, or two `load`
+  // commands arriving close together) - without this, an older call's
+  // `await`s could resolve after a newer one already started and clobber
+  // its chunks/bookId/chapterBase with stale data, or call audio.play() on
+  // a chapter no longer actually loaded.
+  var loadToken = 0;
+
+  async function playChapter(id, base, resumeSeconds){
+    var myToken = ++loadToken;
+    await ensureChapterList(id);
+    if (myToken !== loadToken) return;
+    chapterBase = base;
+    await prepareChapter(id, base);
+    if (myToken !== loadToken) return;
+
+    idleScreen.style.display = 'none';
+    frame.style.display = 'flex';
+
+    audio.src = '/api/books/' + id + '/chapters/' + base + '/audio';
+    if (resumeSeconds) {
+      seekToTime(resumeSeconds);
+      audio.play().catch(function(e){ console.log('resume autoplay failed: ' + e); });
+    } else {
+      updateForTime(0);
+      audio.play().catch(function(e){ console.log('autoplay failed: ' + e); });
+    }
+    reportState(true);
+  }
+
+  // Sent by the server when a different device becomes the active player -
+  // returns this device to its idle screen instead of continuing to play
+  // locally with nothing listening to it anymore.
+  function deactivate(){
+    loadToken++; // supersede any in-flight playChapter()
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    blankPage();
+    frame.style.display = 'none';
+    idleScreen.style.display = 'flex';
+    bookId = null; chapterBase = null; allChapters = [];
+  }
+
+  function goNextChapter(){
+    var pos = allChapters.indexOf(chapterBase);
+    if (pos >= 0 && pos < allChapters.length - 1) playChapter(bookId, allChapters[pos + 1], 0);
+  }
+  function goPrevChapter(){
+    var pos = allChapters.indexOf(chapterBase);
+    if (pos > 0) playChapter(bookId, allChapters[pos - 1], 0);
+  }
+
+  // --- WebSocket sync: this page is a "player" - it reports its own state
+  // and blindly applies whatever commands arrive, exactly the same command
+  // vocabulary server/public/remote.html and index.html use.
+  var ws = null;
+  var lastReportedSecond = -1;
+
+  function wsSend(payload){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  }
+
+  // Persists to the same SQLite-backed /last-position endpoint index.html
+  // already uses, throttled identically (~1/sec) - without this, "Continue"
+  // on remote.html/index.html's library screen would silently go stale the
+  // moment someone actually listens via the TV instead of a browser tab.
+  function persistLastPosition(t){
+    if (!bookId || !chapterBase) return;
+    fetch('/api/books/' + bookId + '/last-position', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chapterBase: chapterBase, positionSeconds: t })
+    }).catch(function(){});
+  }
+
+  // The real chapter number parsed from the filename, and the highest
+  // such number present in the folder - not folder-relative position/
+  // count, matching player.html's own chapterTotalCount()/updateChapterPill()
+  // (this page has no on-screen pill of its own, but remote.html's
+  // chapter pill is driven by this same state broadcast, so it needs to
+  // agree with how player.html reports it).
+  function chapterNumber(base){
+    if (!base) return null; // reportState() can fire (a spurious audio event) before chapterBase is ever set
+    var m = base.match(/(\d+)$/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+  function chapterTotalCount(){
+    return allChapters.reduce(function(max, base){
+      var n = chapterNumber(base);
+      return (n !== null && n > max) ? n : max;
+    }, 0);
+  }
+
+  function reportState(force){
+    var t = (audio.currentTime || 0);
+    var sec = Math.floor(t);
+    if (!force && sec === lastReportedSecond) return;
+    lastReportedSecond = sec;
+    persistLastPosition(t);
+    wsSend({
+      type: 'state',
+      bookId: bookId, chapterBase: chapterBase,
+      position: t, duration: chapterDuration,
+      paused: audio.paused,
+      preset: textPreset, theme: document.documentElement.classList.contains('light') ? 'light' : 'dark',
+      chapterIndex: chapterNumber(chapterBase) || 0, totalChapters: chapterTotalCount(),
+      partIndex: idx + 1, totalParts: chunks.length
+    });
+  }
+
+  audio.addEventListener('timeupdate', function(){
+    updateForTime(audio.currentTime || 0);
+    reportState(false);
+  });
+  audio.addEventListener('play', function(){ reportState(true); });
+  audio.addEventListener('pause', function(){ reportState(true); });
+  audio.addEventListener('ended', function(){ goNextChapter(); });
+
+  function handleCommand(msg){
+    switch (msg.action) {
+      case 'load':
+        playChapter(msg.bookId, msg.chapterBase, msg.positionSeconds || 0);
+        break;
+      case 'deactivate':
+        deactivate();
+        break;
+      case 'playPause':
+        if (audio.paused) audio.play(); else audio.pause();
+        break;
+      case 'seek':
+        seekToTime(msg.value || 0);
+        break;
+      case 'next': goNext(); break;
+      case 'prev': goPrev(); break;
+      case 'setVolume':
+        audio.volume = Math.max(0, Math.min(1, msg.value));
+        break;
+      case 'nextChapter': goNextChapter(); break;
+      case 'prevChapter': goPrevChapter(); break;
+      case 'setPreset':
+        textPreset = msg.value === 'B' ? 'B' : 'A';
+        if (shown && chunkSpans.length) {
+          applyInitialSpanState();
+          updateChunkHighlight(audio.currentTime || 0, chunks[idx]);
+        }
+        reportState(true);
+        break;
+      case 'setTheme':
+        applyTheme(msg.value === 'light' ? 'light' : 'dark');
+        reportState(true);
+        break;
+    }
+  }
+
+  function connect(){
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.addEventListener('open', function(){
+      wsSend({ type: 'hello', role: 'player', deviceId: deviceId, deviceName: deviceName, deviceKind: 'tv' });
+    });
+    ws.addEventListener('message', function(ev){
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'command') handleCommand(msg);
+    });
+    ws.addEventListener('close', function(){ setTimeout(connect, 2000); });
+    ws.addEventListener('error', function(){ try { ws.close(); } catch (e) {} });
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

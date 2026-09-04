@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230b0b0d'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Roboto, Arial, sans-serif' font-weight='700' font-size='20' fill='%23e08a3c'%3ES%3C/text%3E%3C/svg%3E">
+<title>SHAMA Remote</title>
+<!--
+  LAYER 5 of the app-shell rebuild (see CLAUDE.md's layer map) - the last
+  piece. Book/chapter browsing is entirely library.html/chapter.html's job
+  now (reached via this page's own icons, carrying ?mode=remote); this
+  file is purely the now-playing/control surface.
+
+  Never plays audio itself - a WebSocket role:'controller' connection
+  (same protocol player.html/tv-player.html speak, see server/src/sync.js)
+  drives whichever device is currently active via transport commands, and
+  mirrors it via `state` broadcasts. Three states, driven entirely by the
+  server's `devices` message ({active, idleTv}):
+    - active exists            -> the control screen below (this file's
+                                   main content).
+    - no active, but an idling
+      tv-player exists         -> auto-redirect to library.html?mode=remote
+                                   immediately - tv-player always starts
+                                   idle and remote's whole job is to
+                                   trigger it, so there's nothing to
+                                   control yet.
+    - neither                  -> "No Device Available", red-outlined -
+                                   remote can't initiate a playback that
+                                   isn't already running somewhere; the
+                                   user resolves this themselves (start a
+                                   tv-player, or go back and use the app as
+                                   Player).
+
+  --- Layout (mockup-driven, see the Sep 2026 remote-mobile-mockup) ---
+  Every dimension - horizontal AND vertical - is expressed as a multiple
+  of one custom property, --u, defined as `min(1vw, 7.86px)`. 7.86px is
+  exactly 1% of the 786px breakpoint, so --u behaves as a plain 1vw unit
+  below that width (the whole layout scales fluidly with real viewport
+  width, phone-to-phone/tablet) and FREEZES at its 786px-equivalent value
+  above it (the layout stops growing and just centers, with a silver
+  outline drawn around it standing in for a phone bezel - the classic
+  "fluid up to a cap, then centered" pattern, achieved with a single CSS
+  min() rather than a resize-driven JS breakpoint). Using the same unit
+  for every axis is what keeps every element's own proportions - the
+  square cover art most visibly - locked together as the viewport widens,
+  rather than horizontal and vertical measurements drifting apart the way
+  independent vw/vh units would.
+-->
+<style>
+  :root {
+    --bg:#0b0b0d; --ink:#e8e6ea; --panel-bg-2:#1c1a20;
+    --border:#3a3840; --muted:#9b93b0; --muted2:#9a97a0; --placeholder-ink:#4a4650;
+    --accent:#e08a3c; --progress-track:#2a2830; --danger:#d9534f;
+    --frame-outline:rgba(210,210,220,0.4);
+    --u: min(1vw, 7.86px);
+  }
+  :root.light {
+    --bg:#e5decf; --ink:#000000; --panel-bg-2:#efe8d8;
+    --border:#b8ab8e; --muted:#7a6f58; --muted2:#8a7f68; --placeholder-ink:#a89a7d;
+    --accent:#e08a3c; --progress-track:#cfc3a8; --danger:#c0392b;
+    --frame-outline:rgba(90,80,60,0.35);
+  }
+  html, body { margin:0; min-height:100%; background:var(--bg); color:var(--ink); font-family:"Roboto","Arial",sans-serif; }
+  body { box-sizing:border-box; display:flex; justify-content:center; }
+
+  #remoteFrame {
+    width:calc(100 * var(--u)); box-sizing:border-box;
+    padding:calc(3.5 * var(--u)) calc(5 * var(--u));
+    display:flex; flex-direction:column;
+  }
+  /* Below 786px this is a no-op (--u already tracks 1vw, so the frame is
+     already exactly 100vw wide - there's nothing to visually "frame" on
+     a real phone screen). At/above it, --u is frozen and the frame stops
+     growing - centered by body's own justify-content:center - so the
+     outline reads as a phone bezel holding a fixed-size remote control.
+     A fixed (not --u-scaled) 20px top gap keeps that bezel from touching
+     the browser's own top edge - not part of the phone-shaped composition
+     itself, just breathing room around it once it's sitting in a wide
+     window, so it stays a flat px value rather than scaling with --u. */
+  @media (min-width:786px) {
+    body { padding-top:20px; }
+    #remoteFrame { border:1px solid var(--frame-outline); border-radius:calc(9 * var(--u)); }
+  }
+
+  #controlScreen, #noDeviceScreen { display:none; width:100%; flex-direction:column; align-items:center; }
+  #controlScreen.show, #noDeviceScreen.show { display:flex; }
+
+  .iconBtn {
+    box-sizing:border-box; border-radius:50%; border:1px solid var(--border);
+    background:none; color:var(--ink); display:flex; align-items:center; justify-content:center;
+    padding:0; flex-shrink:0; font-family:inherit;
+  }
+  .iconBtn.active { border-color:var(--accent); color:var(--accent); }
+  .iconBtn:disabled { opacity:0.35; }
+
+  /* Width-matched to #coverWrap (also 80u, also margin:0 auto) rather
+     than stretched to the full content column, so the leftmost/rightmost
+     icons land flush with the cover image's own left/right edges instead
+     of spreading wider than it. */
+  #topIcons {
+    display:flex; justify-content:space-between; align-items:center;
+    width:calc(80 * var(--u)); margin:0 auto calc(1.5 * var(--u));
+  }
+  #topIcons .iconBtn { width:calc(9.2 * var(--u)); height:calc(9.2 * var(--u)); }
+  #topIcons .iconBtn svg { width:calc(4.6 * var(--u)); height:calc(4.6 * var(--u)); }
+  #presetToggleBtn { font-size:calc(4.4 * var(--u)); font-weight:500; }
+
+  #coverWrap {
+    width:calc(80 * var(--u)); height:calc(80 * var(--u)); flex-shrink:0;
+    margin:0 auto calc(2 * var(--u));
+  }
+  #coverImg, #coverPlaceholder {
+    width:100%; height:100%; border-radius:calc(3 * var(--u)); object-fit:cover;
+    background:var(--panel-bg-2);
+  }
+  #coverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:calc(10 * var(--u)); }
+  #coverImg, #coverPlaceholder {
+    -webkit-mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    -webkit-mask-composite: source-in;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: 100% 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0%, black 30%, black 70%, transparent 100%),
+      linear-gradient(to bottom, transparent 0%, black 30%, black 70%, transparent 100%);
+    mask-composite: intersect;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+  }
+
+  #titleText {
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    font-size:calc(4.2 * var(--u)); font-weight:700; color:var(--ink); text-align:center;
+    max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    margin-bottom:calc(1 * var(--u));
+  }
+  #authorText {
+    font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif;
+    font-size:calc(2.6 * var(--u)); color:var(--muted); text-align:center;
+    max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    margin-bottom:calc(1.5 * var(--u));
+  }
+
+  .pill {
+    flex-shrink:0; display:flex; align-items:center; justify-content:center; gap:calc(0.6 * var(--u));
+    height:calc(5 * var(--u)); box-sizing:border-box; padding:0 calc(1.6 * var(--u));
+    border-radius:999px; border:1px solid var(--border); background:none; color:var(--ink);
+    font-size:calc(2.2 * var(--u)); white-space:nowrap; font-family:inherit;
+  }
+  .pill svg { flex-shrink:0; width:calc(1.6 * var(--u)); height:calc(1.6 * var(--u)); }
+  #pillRow { display:flex; justify-content:center; align-items:center; gap:calc(1.2 * var(--u)); margin:0 auto calc(2 * var(--u)); }
+  #chapterPill { width:calc(48 * var(--u)); }
+  #speedPill { cursor:pointer; }
+
+  /* Speed overlay - identical design to player.html's own speedOverlay/
+     speedPanel (‹ value ›, slider, presets), sized in plain px/vw rather
+     than --u since it's a modal interruption over the whole viewport, not
+     part of the phone-shaped composition itself. */
+  #speedOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); align-items:center; justify-content:center; z-index:10; touch-action:none; }
+  #speedPanel { width:min(320px, 84vw); background:var(--panel-bg-2); border:1px solid var(--border); border-radius:16px; padding:20px; box-sizing:border-box; }
+  #speedValueRow { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  #speedValueRow button { width:40px; height:40px; border-radius:50%; border:1px solid var(--border); background:none; color:var(--ink); font-size:20px; font-family:inherit; }
+  #speedValue { font-size:26px; font-weight:600; color:var(--accent); }
+  #speedSliderRow { display:flex; align-items:center; gap:10px; font-size:11px; color:var(--muted); margin-bottom:14px; }
+  #speedSlider { flex:1; }
+  #speedPresets { display:flex; justify-content:space-between; gap:6px; }
+  #speedPresets button { flex:1; padding:8px 0; border-radius:10px; border:1px solid var(--border); background:none; color:var(--ink); font-size:12px; font-family:inherit; }
+
+  /* Inert wrapper by default - #progressTrack/#timeRow behave exactly as
+     if it didn't exist (direct flex children of #controlScreen, same as
+     before). Only on mobile does it become a real flex column, reversed
+     so the time labels render above the seek bar instead of below it -
+     see the mobile block. */
+  #progressGroup { display:contents; }
+  #progressTrack { position:relative; height:calc(2.2 * var(--u)); width:100%; display:flex; align-items:center; }
+  #progressTrackLine { position:relative; width:100%; height:calc(0.3 * var(--u)); background:var(--progress-track); border-radius:2px; }
+  #progressFill { position:absolute; left:0; top:0; height:100%; width:0%; background:var(--accent); border-radius:2px; }
+  #progressMarker {
+    position:absolute; top:50%; left:0%; width:calc(1.6 * var(--u)); height:calc(1.6 * var(--u));
+    margin-left:calc(-0.8 * var(--u)); margin-top:calc(-0.8 * var(--u)); border-radius:50%; background:var(--accent);
+    box-shadow:0 0 0 calc(0.6 * var(--u)) rgba(224,138,60,0.15);
+  }
+  #timeRow {
+    display:flex; justify-content:space-between; width:100%; font-size:calc(2 * var(--u)); color:var(--muted);
+    margin-bottom:calc(1 * var(--u));
+  }
+
+  #playerControls {
+    display:flex; justify-content:center; align-items:center; gap:calc(2 * var(--u));
+    height:calc(8 * var(--u)); margin-bottom:calc(1 * var(--u));
+  }
+  #playerControls .iconBtn { width:calc(7 * var(--u)); height:calc(7 * var(--u)); }
+  #playerControls .iconBtn svg { width:calc(3 * var(--u)); height:calc(3 * var(--u)); }
+  #playPauseBtn svg { width:calc(3.2 * var(--u)); height:calc(3.2 * var(--u)); }
+
+  #volumeRow {
+    display:flex; justify-content:center; align-items:center; gap:calc(1.4 * var(--u));
+    width:calc(52 * var(--u)); height:calc(7 * var(--u)); margin:0 auto calc(1.5 * var(--u));
+  }
+  #volumeRow .iconBtn { width:calc(6 * var(--u)); height:calc(6 * var(--u)); }
+  #volumeRow .iconBtn svg { width:calc(2.4 * var(--u)); height:calc(2.4 * var(--u)); }
+  #volDownBtn, #volUpBtn { font-size:calc(2.6 * var(--u)); }
+  #volumeLevelPill { width:auto; min-width:calc(3.6 * var(--u)); padding:0 calc(0.8 * var(--u)); font-size:calc(2.2 * var(--u)); font-weight:600; cursor:default; }
+
+  .devicePillCol { display:flex; flex-direction:column; align-items:center; gap:calc(1 * var(--u)); width:100%; }
+  .pillIconRow { display:flex; align-items:center; justify-content:center; gap:calc(0.8 * var(--u)); width:100%; }
+  #playingOnPill, #continueOnBtn { height:calc(6 * var(--u)); width:100%; box-sizing:border-box; font-size:calc(2.2 * var(--u)); font-family:inherit; }
+  #playingOnPill { border-color:var(--accent); color:var(--accent); }
+  #continueOnBtn { cursor:pointer; }
+  /* Clicking #playingOnPill while it's showing a tv-player sends it back
+     to idle (see the deactivateTv command) - it then morphs in place into
+     this plain-bordered "Continue Playing on X" look, taking over
+     #continueOnBtn's old role for that same device rather than showing a
+     second, redundant pill (see applyDeviceStateNow()'s justSelfIdled
+     branch). Higher specificity than the plain #playingOnPill rule above
+     (an extra class), so it wins once applied. */
+  #playingOnPill.pill-idle { border-color:var(--border); color:var(--ink); cursor:pointer; }
+
+  /* Mobile-only bumps (real phone/tablet widths, below the 786px cap) -
+     bigger text and touch targets than the capped-desktop view needs,
+     since a desktop viewer is closer to their screen than someone
+     actually holding this as a remote. */
+  @media (max-width:785.98px) {
+    /* Cover -10% (80u -> 72u). */
+    #coverWrap { width:calc(72 * var(--u)); height:calc(72 * var(--u)); }
+
+    /* Top icon row re-anchored to the seek bar's own edges instead of the
+       cover image's (both #topIcons and #progressTrack are width:100% of
+       the same content column, so this - not matching the now-smaller
+       cover - is what keeps the leftmost/rightmost icon flush with where
+       the seek bar begins/ends). Sized to match the control buttons
+       below (12.6u) rather than their own earlier fixed size, and the
+       icon glyphs/preset text scaled with the same icon-to-button ratio
+       the control buttons use (5.4/12.6). */
+    #topIcons { width:100%; margin-bottom:calc(1.5 * var(--u) + 5px); } /* top icon row -> cover, +5px flat */
+    #topIcons .iconBtn { width:calc(12.6 * var(--u)); height:calc(12.6 * var(--u)); }
+    #topIcons .iconBtn svg { width:calc(5.4 * var(--u)); height:calc(5.4 * var(--u)); }
+    #presetToggleBtn { font-size:calc(5.4 * var(--u)); }
+
+    #titleText { font-size:calc(7.56 * var(--u)); } /* 8.4u -10% */
+    #authorText { font-size:calc(5.2 * var(--u)); }
+
+    /* Control buttons -10% (14u -> 12.6u), and re-distributed so the
+       leftmost/rightmost button's own edge lands flush with the seek
+       bar's edge (both are width:100% of the same content column) rather
+       than centered with fixed gaps. */
+    #playerControls { height:calc(12.6 * var(--u)); width:100%; justify-content:space-between; }
+    #playerControls .iconBtn { width:calc(12.6 * var(--u)); height:calc(12.6 * var(--u)); }
+    #playerControls .iconBtn svg { width:calc(5.4 * var(--u)); height:calc(5.4 * var(--u)); }
+    #playPauseBtn svg { width:calc(5.76 * var(--u)); height:calc(5.76 * var(--u)); }
+
+    /* Volume controls sized to match the control buttons too (12.6u),
+       same icon-to-button ratio (5.4/12.6) applied throughout - the row's
+       own height has to grow to match too, or the now-bigger buttons
+       overflow past the row's old (smaller) box into the row above. */
+    #volumeRow { height:calc(12.6 * var(--u)); }
+    #volumeRow .iconBtn { width:calc(12.6 * var(--u)); height:calc(12.6 * var(--u)); }
+    #volumeRow .iconBtn svg { width:calc(5.4 * var(--u)); height:calc(5.4 * var(--u)); }
+    #volDownBtn, #volUpBtn { font-size:calc(5.4 * var(--u)); }
+    #volumeLevelPill { font-size:calc(4.62 * var(--u)); }
+
+    #pillRow { margin-bottom:10px; } /* chapter/speed pills -> seek bar, flat 5px+5px gap */
+
+    /* Time labels moved above the seek bar (reversed within their own
+       wrapper - see #progressGroup's base rule) instead of below it, and
+       tripled in size; the bar itself doubled in thickness. Both
+       children's own margins are zeroed and replaced by the wrapper's
+       `gap` (labels -> bar) and `margin-bottom` (bar -> control buttons,
+       carrying over the old seek-bar-> controls gap value) so spacing is
+       unambiguous regardless of how column-reverse treats margins. */
+    #progressGroup {
+      display:flex; flex-direction:column-reverse; width:100%;
+      gap:calc(0.6 * var(--u)); margin-bottom:calc(1.2 * var(--u) + 15px);
+    }
+    #timeRow { font-size:calc(3 * var(--u)); margin:0; } /* was tripled to 6u, now halved back down to 3u */
+    #progressTrack { margin:0; }
+    #progressTrackLine { height:calc(1.2 * var(--u)); } /* bar thickness x2 again (0.6u -> 1.2u) */
+    /* Marker ball x2 (1.6u -> 3.2u) - negative margins re-centered on the
+       new size, halo shadow scaled to match. */
+    #progressMarker {
+      width:calc(3.2 * var(--u)); height:calc(3.2 * var(--u));
+      margin-left:calc(-1.6 * var(--u)); margin-top:calc(-1.6 * var(--u));
+      box-shadow:0 0 0 calc(1.2 * var(--u)) rgba(224,138,60,0.15);
+    }
+
+    #playerControls { margin-bottom:calc(1.2 * var(--u)); } /* control buttons -> volume row, +20% (1u) */
+    #volumeRow { margin-bottom:calc(1.8 * var(--u) + 10px); } /* volume row -> device pills, +20% (1.5u) +10px flat */
+
+    /* Continue/playing pills -10% text (4.4u -> 3.96u); their icon is
+       sized to match that same text size instead of the smaller global
+       .pill svg default, and the column gets its own 5% gap between the
+       two pills (overriding .devicePillCol's base 1u). */
+    /* min-height (not height) so the added vertical padding can grow the
+       box past 6.6u if the text needs it, rather than eating into a
+       rigid fixed height and cramping the content instead of framing it. */
+    #playingOnPill, #continueOnBtn {
+      font-size:calc(3.96 * var(--u)); min-height:calc(6.6 * var(--u)); height:auto;
+      padding-top:calc(1.6 * var(--u)); padding-bottom:calc(1.6 * var(--u));
+    }
+    #playingOnPill svg, #continueOnBtn svg { width:calc(3.96 * var(--u)); height:calc(3.96 * var(--u)); }
+    .devicePillCol { gap:calc(5 * var(--u)); }
+
+    /* Chapter/speed pills replicate the continue-playing pill's icon
+       size, font size, and vertical padding (min-height, not a rigid
+       height, for the same reason as above). */
+    /* chapterPill's base width is a fixed 48u (see the non-mobile rule) -
+       at the now-larger 3.96u font that leaves almost no slack around the
+       text/icon (measured ~1px each side), so extra horizontal padding
+       would just push it into real overflow unless the fixed width is
+       relaxed to auto here too, letting it size to its own content the
+       same way speedPill already does. #pillRow still centers the pair
+       as a unit either way. */
+    #chapterPill { width:auto; }
+    #chapterPill, #speedPill {
+      font-size:calc(3.96 * var(--u)); min-height:calc(5 * var(--u)); height:auto;
+      padding-top:calc(1.6 * var(--u)); padding-bottom:calc(1.6 * var(--u));
+      padding-left:calc(3 * var(--u)); padding-right:calc(3 * var(--u));
+    }
+    #chapterPill svg, #speedPill svg { width:calc(3.96 * var(--u)); height:calc(3.96 * var(--u)); }
+  }
+
+  #noDeviceScreen { justify-content:center; min-height:60vh; gap:calc(1.6 * var(--u)); text-align:center; padding:0 calc(2 * var(--u)); box-sizing:border-box; }
+  #noDeviceTitle { font-size:calc(4.2 * var(--u)); font-weight:700; letter-spacing:0.15em; color:var(--ink); }
+  #noDevicePill { border:1px solid var(--danger); color:var(--danger); border-radius:999px; padding:calc(1 * var(--u)) calc(2.2 * var(--u)); font-size:calc(1.8 * var(--u)); font-weight:600; text-transform:uppercase; }
+  #noDeviceHint { font-size:calc(1.6 * var(--u)); color:var(--muted); max-width:calc(50 * var(--u)); }
+  #noDeviceHomeBtn {
+    display:flex; align-items:center; gap:calc(0.8 * var(--u)); height:calc(5 * var(--u)); padding:0 calc(2.4 * var(--u)); margin-top:calc(0.8 * var(--u));
+    border-radius:999px; border:1px solid var(--border); background:none; color:var(--ink);
+    text-decoration:none; font-size:calc(1.8 * var(--u)); font-weight:600; text-transform:uppercase;
+  }
+  #noDeviceHomeBtn svg { width:calc(2 * var(--u)); height:calc(2 * var(--u)); }
+</style>
+</head>
+<body>
+
+<div id="remoteFrame">
+<div id="controlScreen">
+  <div id="topIcons">
+    <button id="allBooksBtn" class="iconBtn" aria-label="All books">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+    </button>
+    <button id="libraryBtn" class="iconBtn" aria-label="Back to chapter list">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></svg>
+    </button>
+    <button id="bookmarkBtn" class="iconBtn" aria-label="Bookmark this spot">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4V3z"/></svg>
+    </button>
+    <button id="themeToggleBtn" class="iconBtn" aria-label="Toggle light/dark theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+    <button id="presetToggleBtn" class="iconBtn" aria-label="Toggle text animation preset">あ</button>
+    <button id="zenToggleBtn" class="iconBtn" aria-label="Toggle zen mode">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    </button>
+  </div>
+
+  <div id="coverWrap">
+    <img id="coverImg" style="display:none;">
+    <div id="coverPlaceholder">&#9834;</div>
+  </div>
+  <div id="titleText"></div>
+  <div id="authorText"></div>
+
+  <div id="pillRow">
+    <div id="chapterPill" class="pill">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+      <span id="chapterPillText"></span>
+    </div>
+    <button id="speedPill" class="pill" aria-label="Open speed control">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 12 L16 8"/><circle cx="12" cy="12" r="9"/></svg>
+      <span id="speedPillText">1.00x</span>
+    </button>
+  </div>
+
+  <div id="progressGroup">
+    <div id="progressTrack">
+      <div id="progressTrackLine">
+        <div id="progressFill"></div>
+        <div id="progressMarker"></div>
+      </div>
+    </div>
+    <div id="timeRow"><span id="elapsedLabel">0:00</span><span id="totalLabel">0:00</span></div>
+  </div>
+
+  <div id="playerControls">
+    <button id="prevChapterBtn" class="iconBtn" aria-label="Previous chapter">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+    </button>
+    <button id="prevPartBtn" class="iconBtn" aria-label="Previous part">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <button id="playPauseBtn" class="iconBtn" aria-label="Play">
+      <svg id="playIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6.5 3 20.5 12 6.5 21 6.5 3"/></svg>
+      <svg id="pauseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+    </button>
+    <button id="nextPartBtn" class="iconBtn" aria-label="Next part">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>
+    <button id="nextChapterBtn" class="iconBtn" aria-label="Next chapter">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+    </button>
+  </div>
+
+  <div id="volumeRow">
+    <button id="volDownBtn" class="iconBtn" aria-label="Decrease volume">&minus;</button>
+    <div id="volumeLevelPill" class="iconBtn">100</div>
+    <button id="volUpBtn" class="iconBtn" aria-label="Increase volume">+</button>
+    <button id="muteBtn" class="iconBtn" aria-label="Mute">
+      <svg id="volumeIconNormal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><path d="M16 8a5 5 0 0 1 0 8"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
+      <svg id="volumeIconMuted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polygon points="3 9 7 9 12 4 12 20 7 15 3 15 3 9"/><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></svg>
+    </button>
+  </div>
+
+  <div class="devicePillCol">
+    <button id="continueOnBtn" class="pill" style="display:none;">
+      <span class="pillIconRow" id="continueOnLabel"></span>
+    </button>
+    <button id="playingOnPill" class="pill">
+      <span class="pillIconRow" id="playingOnLabel"></span>
+    </button>
+  </div>
+</div>
+
+<div id="noDeviceScreen">
+  <div id="noDeviceTitle">SHAMA</div>
+  <div id="noDevicePill">No Device Available</div>
+  <div id="noDeviceHint">Start a tv-player or a player somewhere else, then come back - or go back and use this device to read directly.</div>
+  <a id="noDeviceHomeBtn" href="index.html">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+    <span>Home</span>
+  </a>
+</div>
+</div>
+
+<div id="bookmarkToast" style="position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--panel-bg-2); border:1px solid var(--border); color:var(--ink); padding:8px 16px; border-radius:999px; font-size:13px; opacity:0; transition:opacity 0.3s; pointer-events:none; white-space:nowrap;"></div>
+
+<div id="speedOverlay">
+  <div id="speedPanel">
+    <div id="speedValueRow">
+      <button id="speedDown">&#8249;</button>
+      <div id="speedValue">1.00x</div>
+      <button id="speedUp">&#8250;</button>
+    </div>
+    <div id="speedSliderRow">
+      <span>0.25</span>
+      <input type="range" id="speedSlider" min="0.25" max="8" step="0.01" value="1">
+      <span>8.00</span>
+    </div>
+    <div id="speedPresets">
+      <button data-speed="0.8">0.8</button>
+      <button data-speed="1.0">1.0</button>
+      <button data-speed="1.25">1.25</button>
+      <button data-speed="1.5">1.5</button>
+      <button data-speed="2.0">2.0</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var controlScreen = document.getElementById('controlScreen');
+  var noDeviceScreen = document.getElementById('noDeviceScreen');
+  var bookmarkToast = document.getElementById('bookmarkToast');
+
+  var allBooksBtn = document.getElementById('allBooksBtn');
+  var libraryBtn = document.getElementById('libraryBtn');
+  var bookmarkBtn = document.getElementById('bookmarkBtn');
+  var themeToggleBtn = document.getElementById('themeToggleBtn');
+  var presetToggleBtn = document.getElementById('presetToggleBtn');
+  var zenToggleBtn = document.getElementById('zenToggleBtn');
+
+  var coverImg = document.getElementById('coverImg');
+  var coverPlaceholder = document.getElementById('coverPlaceholder');
+  var titleText = document.getElementById('titleText');
+  var authorText = document.getElementById('authorText');
+  var chapterPillText = document.getElementById('chapterPillText');
+
+  var progressTrack = document.getElementById('progressTrack');
+  var progressFill = document.getElementById('progressFill');
+  var progressMarker = document.getElementById('progressMarker');
+  var elapsedLabel = document.getElementById('elapsedLabel');
+  var totalLabel = document.getElementById('totalLabel');
+
+  var playPauseBtn = document.getElementById('playPauseBtn');
+  var playIcon = document.getElementById('playIcon');
+  var pauseIcon = document.getElementById('pauseIcon');
+  var prevChapterBtn = document.getElementById('prevChapterBtn');
+  var prevPartBtn = document.getElementById('prevPartBtn');
+  var nextPartBtn = document.getElementById('nextPartBtn');
+  var nextChapterBtn = document.getElementById('nextChapterBtn');
+
+  var volUpBtn = document.getElementById('volUpBtn');
+  var volDownBtn = document.getElementById('volDownBtn');
+  var volumeLevelPill = document.getElementById('volumeLevelPill');
+  var muteBtn = document.getElementById('muteBtn');
+  var volumeIconNormal = document.getElementById('volumeIconNormal');
+  var volumeIconMuted = document.getElementById('volumeIconMuted');
+
+  var continueOnBtn = document.getElementById('continueOnBtn');
+  var continueOnLabel = document.getElementById('continueOnLabel');
+  var playingOnLabel = document.getElementById('playingOnLabel');
+
+  var speedPill = document.getElementById('speedPill');
+  var speedPillText = document.getElementById('speedPillText');
+  var speedOverlay = document.getElementById('speedOverlay');
+  var speedValue = document.getElementById('speedValue');
+  var speedSlider = document.getElementById('speedSlider');
+  var speedDown = document.getElementById('speedDown');
+  var speedUp = document.getElementById('speedUp');
+
+  // Device-kind-aware icon for the two device pills - a TV/desktop reads
+  // as a "screen", a phone/tablet reads as a "phone" - matches the mockup
+  // (monitor glyph for "Living Room TV", phone glyph for "Player (Phone)").
+  var MONITOR_ICON = '<svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>';
+  var PHONE_ICON = '<svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2" width="10" height="20" rx="2" ry="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>';
+  function deviceIcon(kind){
+    return (kind === 'phone' || kind === 'tablet') ? PHONE_ICON : MONITOR_ICON;
+  }
+
+  function humanize(base){
+    var m = (base || '').match(/(\d+)$/);
+    return m ? ('Chapter ' + parseInt(m[1], 10)) : (base || '');
+  }
+  function formatTime(s){
+    if (!isFinite(s) || s < 0) s = 0;
+    s = Math.round(s);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    var mm = (h > 0 && m < 10) ? ('0' + m) : String(m);
+    var ss = sec < 10 ? ('0' + sec) : String(sec);
+    return h > 0 ? (h + ':' + mm + ':' + ss) : (m + ':' + ss);
+  }
+
+  // --- Theme (dark/light) - remote's own persisted preference, same
+  // pattern as every other page - also pushed to the active device on
+  // every toggle so both stay visually in sync going forward.
+  var theme = 'dark';
+  try { theme = localStorage.getItem('theme') || 'dark'; } catch (e) {}
+  function applyTheme(){
+    document.documentElement.classList.toggle('light', theme === 'light');
+  }
+  applyTheme();
+  themeToggleBtn.addEventListener('click', function(){
+    theme = theme === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('theme', theme); } catch (e) {}
+    applyTheme();
+    sendCommand({ action: 'setTheme', value: theme });
+  });
+
+  // Preset toggle deliberately never changes color/outline (matches
+  // player.html's own あ button) - it still persists locally and pushes
+  // the command, just without any active-state visual indicator.
+  var textPreset = 'A';
+  try { textPreset = localStorage.getItem('textPreset') || 'A'; } catch (e) {}
+  presetToggleBtn.addEventListener('click', function(){
+    textPreset = textPreset === 'A' ? 'B' : 'A';
+    try { localStorage.setItem('textPreset', textPreset); } catch (e) {}
+    sendCommand({ action: 'setPreset', value: textPreset });
+  });
+
+  // Always visible now, even while the active device is a tv-player -
+  // tv-player.html has no toggleZen handler at all, so the command is a
+  // harmless no-op there rather than needing to be hidden/disabled client-side.
+  zenToggleBtn.addEventListener('click', function(){
+    sendCommand({ action: 'toggleZen' });
+  });
+
+  allBooksBtn.addEventListener('click', function(){
+    location.href = 'library.html?mode=remote';
+  });
+
+  function showBookmarkToast(text){
+    bookmarkToast.textContent = text;
+    bookmarkToast.style.opacity = '1';
+    setTimeout(function(){ bookmarkToast.style.opacity = '0'; }, 1600);
+  }
+
+  // --- WebSocket: controller-only, never reports its own state. Always
+  // targets whichever device the server considers active - no manual
+  // device-selection bookkeeping needed here (that's chapter.html's job,
+  // via switchActive; this page just follows whoever's active).
+  var deviceId;
+  try {
+    deviceId = localStorage.getItem('remoteDeviceId');
+    if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem('remoteDeviceId', deviceId); }
+  } catch (e) { deviceId = 'remote-' + Math.random().toString(36).slice(2); }
+
+  var ws = null;
+  var activeDevice = null; // {deviceId, deviceName, deviceKind} | null
+  var idleTv = null; // {deviceId, deviceName} | null
+  var activeState = null; // last `state` broadcast for the active device
+  var lastRenderedBookId = null; // avoids re-fetching book title/author every tick
+  var lastDeactivatedTvId = null; // set right when WE send deactivateTv - see applyDeviceStateNow()
+
+  function wsSend(payload){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  }
+  function sendCommand(cmd){
+    cmd.type = 'command';
+    wsSend(cmd);
+  }
+
+  // Distinct from chapter.html's "Switch to X" - this carries whatever's
+  // currently playing straight over to the idle device (see sync.js's
+  // continueOnDevice handler), no library/chapter re-selection needed.
+  // Updates in place once the resulting `devices`/`state` broadcasts
+  // arrive - after this, idleTv is gone, so the pill naturally disappears.
+  continueOnBtn.addEventListener('click', function(){
+    if (!idleTv) return;
+    sendCommand({ action: 'continueOnDevice', targetDeviceId: idleTv.deviceId });
+  });
+
+  // #playingOnPill does double duty: while a tv-player is active, clicking
+  // it sends it back to idle (deactivateTv) instead of just being an
+  // informational label; once idled it morphs into a "Continue Playing on
+  // X" pill that reactivates the SAME device via continueOnDevice (the
+  // existing mechanism #continueOnBtn already uses for a different idle
+  // TV). Never interactive for a normal player - there's no idle state
+  // for it to return to.
+  playingOnPill.addEventListener('click', function(){
+    if (playingOnPill.classList.contains('pill-idle')) {
+      if (!idleTv) return;
+      sendCommand({ action: 'continueOnDevice', targetDeviceId: idleTv.deviceId });
+      return;
+    }
+    if (!activeDevice || activeDevice.deviceKind !== 'tv') return;
+    lastDeactivatedTvId = activeDevice.deviceId;
+    sendCommand({ action: 'deactivateTv', targetDeviceId: activeDevice.deviceId });
+  });
+
+  // A tv-player claims "active" the instant it connects (same as any
+  // player), but shows its own local idle screen and sends no `state` at
+  // all until something actually loads a chapter on it - from remote's
+  // point of view that's indistinguishable from "nothing to control yet",
+  // so it's treated the same as a genuinely idle TV (redirect to the
+  // library instead of showing a blank control screen).
+  //
+  // `devices` and a `state` for that same device (either an already-
+  // cached one, or a brand new one still being fetched/prepared - e.g.
+  // chapter.html just sent `load` to this exact TV and immediately
+  // navigated here, before the TV's own sync/metadata/image fetches have
+  // had time to finish) arrive as separate WS messages, not atomically -
+  // deciding "no content, never coming" too eagerly would race an
+  // in-flight `state` and wrongly bounce back to the library on a device
+  // that's genuinely in the middle of loading something. Long enough to
+  // comfortably cover a real chapter-load round trip; resolved
+  // immediately, bypassing the wait, the moment a `state` for the active
+  // device actually arrives (the common/fast path).
+  var DEVICE_STATE_SETTLE_MS = 3000;
+  var deviceStateApplyTimer = null;
+
+  function applyDeviceState(){
+    clearTimeout(deviceStateApplyTimer);
+    deviceStateApplyTimer = setTimeout(applyDeviceStateNow, DEVICE_STATE_SETTLE_MS);
+  }
+
+  function applyDeviceStateNow(){
+    clearTimeout(deviceStateApplyTimer);
+    var hasContent = activeState && activeDevice && activeState.deviceId === activeDevice.deviceId;
+    var tvWithNoContentYet = activeDevice && activeDevice.deviceKind === 'tv' && !hasContent;
+    // True right after WE clicked #playingOnPill to idle this exact TV -
+    // stay on the control screen instead of the usual idle-TV-only
+    // redirect to the library, and show it as resumable in place.
+    var justSelfIdled = !activeDevice && idleTv && idleTv.deviceId === lastDeactivatedTvId;
+
+    if (activeDevice && !tvWithNoContentYet) {
+      noDeviceScreen.classList.remove('show');
+      controlScreen.classList.add('show');
+      lastDeactivatedTvId = null; // a real active device again - the stale flag no longer applies
+      renderDevicePills();
+    } else if (justSelfIdled) {
+      renderPlayingPillAsIdle(idleTv);
+    } else if (idleTv || tvWithNoContentYet) {
+      location.href = 'library.html?mode=remote';
+    } else {
+      controlScreen.classList.remove('show');
+      noDeviceScreen.classList.add('show');
+    }
+  }
+
+  function renderDevicePills(){
+    playingOnPill.classList.remove('pill-idle'); // clear any earlier self-idle styling now that it's genuinely active again
+    playingOnPill.style.cursor = (activeDevice.deviceKind === 'tv') ? 'pointer' : 'default';
+    playingOnLabel.innerHTML = deviceIcon(activeDevice.deviceKind) + '<span>Playing on ' + (activeDevice.deviceName || 'Unknown device') + '</span>';
+    if (idleTv) {
+      continueOnLabel.innerHTML = deviceIcon('tv') + '<span>Continue playing on ' + idleTv.deviceName + '</span>';
+      continueOnBtn.style.display = '';
+    } else {
+      continueOnBtn.style.display = 'none';
+    }
+  }
+
+  // #playingOnPill takes over #continueOnBtn's role for this specific
+  // device once self-idled, so the latter stays hidden here - showing
+  // both would be a redundant pair pointing at the same device.
+  function renderPlayingPillAsIdle(tv){
+    playingOnPill.classList.add('pill-idle');
+    playingOnLabel.innerHTML = deviceIcon('tv') + '<span>Continue Playing on ' + tv.deviceName + '</span>';
+    continueOnBtn.style.display = 'none';
+  }
+
+  async function renderBookIdentity(bookId){
+    if (bookId === lastRenderedBookId) return;
+    lastRenderedBookId = bookId;
+    try {
+      var res = await fetch('/api/books').then(function(r){ return r.json(); });
+      var book = (res.books || []).find(function(b){ return b.id === bookId; });
+      titleText.textContent = book ? book.title : bookId;
+      authorText.textContent = book ? (book.author || '') : '';
+    } catch (e) {
+      titleText.textContent = bookId;
+      authorText.textContent = '';
+    }
+  }
+
+  function renderNowPlaying(){
+    if (!activeState) return;
+    renderBookIdentity(activeState.bookId);
+
+    chapterPillText.textContent = 'Chapter: ' + (activeState.chapterIndex || 0) + '/' + (activeState.totalChapters || 0) +
+      ' Part: ' + (activeState.partIndex || 0) + '/' + (activeState.totalParts || 0);
+
+    coverImg.src = '/api/books/' + activeState.bookId + '/chapters/' + activeState.chapterBase + '/cover';
+    coverImg.style.display = 'block';
+    coverPlaceholder.style.display = 'none';
+    coverImg.onerror = function(){
+      coverImg.style.display = 'none';
+      coverPlaceholder.style.display = 'flex';
+    };
+
+    // Skip while the user's actively dragging the seek bar - otherwise
+    // the device's own incoming position updates would fight the drag,
+    // snapping the marker back mid-gesture. Same guard player.html's own
+    // updateForTime() uses against its local `scrubbing` flag.
+    if (!scrubbing) {
+      var pct = activeState.duration > 0 ? Math.max(0, Math.min(100, (activeState.position / activeState.duration) * 100)) : 0;
+      progressFill.style.width = pct + '%';
+      progressMarker.style.left = pct + '%';
+      elapsedLabel.textContent = formatTime(activeState.position);
+    }
+    totalLabel.textContent = formatTime(activeState.duration);
+
+    playIcon.style.display = activeState.paused ? '' : 'none';
+    pauseIcon.style.display = activeState.paused ? 'none' : '';
+
+    if (typeof activeState.speed === 'number' && activeState.speed !== currentSpeed) {
+      currentSpeed = activeState.speed;
+      speedPillText.textContent = currentSpeed.toFixed(2) + 'x';
+      speedValue.textContent = currentSpeed.toFixed(2) + 'x';
+      speedSlider.value = currentSpeed;
+    }
+  }
+
+  // Speed control: same overlay (‹ value ›, slider, presets) as player.html's
+  // own speedPill - a no-op against a tv-player (it has no speed concept
+  // at all), same as the zen icon.
+  var currentSpeed = 1.0;
+  function setSpeed(v){
+    if (!isFinite(v)) return;
+    v = Math.max(0.25, Math.min(8, Math.round(v * 100) / 100));
+    currentSpeed = v;
+    speedPillText.textContent = v.toFixed(2) + 'x';
+    speedValue.textContent = v.toFixed(2) + 'x';
+    speedSlider.value = v;
+    sendCommand({ action: 'setSpeed', value: v });
+  }
+  speedPill.addEventListener('click', function(){
+    speedOverlay.style.display = (speedOverlay.style.display === 'flex') ? 'none' : 'flex';
+  });
+  speedOverlay.addEventListener('click', function(e){
+    if (e.target === speedOverlay) speedOverlay.style.display = 'none';
+  });
+  speedDown.addEventListener('click', function(){ setSpeed(currentSpeed - 0.01); });
+  speedUp.addEventListener('click', function(){ setSpeed(currentSpeed + 0.01); });
+  speedSlider.addEventListener('input', function(){ setSpeed(parseFloat(speedSlider.value)); });
+  Array.prototype.forEach.call(document.querySelectorAll('#speedPresets button'), function(btn){
+    btn.addEventListener('click', function(){ setSpeed(parseFloat(btn.getAttribute('data-speed'))); });
+  });
+
+  function handleServerMessage(msg){
+    if (msg.type === 'devices') {
+      activeDevice = msg.active;
+      idleTv = msg.idleTv;
+      applyDeviceState();
+      return;
+    }
+    if (msg.type === 'state') {
+      activeState = msg;
+      // Resolves the devices/state race immediately rather than waiting
+      // out the debounce - we now know for certain the active device has
+      // content, so there's no reason to delay showing the control screen.
+      if (activeDevice && msg.deviceId === activeDevice.deviceId) applyDeviceStateNow();
+      renderNowPlaying();
+      return;
+    }
+  }
+
+  function connect(){
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.addEventListener('open', function(){
+      wsSend({ type: 'hello', role: 'controller', deviceId: deviceId, deviceName: 'Remote', deviceKind: 'controller' });
+    });
+    ws.addEventListener('message', function(ev){
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      handleServerMessage(msg);
+    });
+    ws.addEventListener('close', function(){ setTimeout(connect, 2000); });
+    ws.addEventListener('error', function(){ try { ws.close(); } catch (e) {} });
+  }
+  connect();
+
+  // --- Transport controls ---
+  playPauseBtn.addEventListener('click', function(){ sendCommand({ action: 'playPause' }); });
+  prevPartBtn.addEventListener('click', function(){ sendCommand({ action: 'prev' }); });
+  nextPartBtn.addEventListener('click', function(){ sendCommand({ action: 'next' }); });
+  var PREV_CHAPTER_DOUBLE_MS = 1500;
+  var lastPrevChapterClick = 0;
+  prevChapterBtn.addEventListener('click', function(){
+    var now = Date.now();
+    if (now - lastPrevChapterClick < PREV_CHAPTER_DOUBLE_MS) {
+      lastPrevChapterClick = 0;
+      sendCommand({ action: 'prevChapter' });
+    } else {
+      lastPrevChapterClick = now;
+      sendCommand({ action: 'seek', value: 0 });
+    }
+  });
+  nextChapterBtn.addEventListener('click', function(){ sendCommand({ action: 'nextChapter' }); });
+
+  libraryBtn.addEventListener('click', function(){
+    if (!activeState) return;
+    location.href = 'chapter.html?book=' + encodeURIComponent(activeState.bookId) + '&mode=remote';
+  });
+
+  bookmarkBtn.addEventListener('click', async function(){
+    if (!activeState) return;
+    try {
+      var res = await fetch('/api/books/' + activeState.bookId + '/bookmarks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chapterBase: activeState.chapterBase, positionSeconds: activeState.position })
+      });
+      var json = await res.json();
+      showBookmarkToast(json && json.label ? json.label : ('Bookmarked ' + formatTime(activeState.position)));
+    } catch (e) { showBookmarkToast('Could not save bookmark'); }
+  });
+
+  // Real drag-to-seek, ported from player.html's own progressTrack
+  // handling: pointerdown starts a drag and previews the position
+  // locally (no command sent yet), pointermove keeps previewing while
+  // held, and only pointerup actually commits the seek. Previously this
+  // only listened for pointerdown and seeked immediately on tap - moving
+  // the pointer while held did nothing, since there was no
+  // pointermove/pointerup handling at all.
+  var scrubbing = false;
+  function scrubTargetFromEvent(e){
+    if (!activeState || !activeState.duration) return 0;
+    var rect = progressTrack.getBoundingClientRect();
+    var frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    return frac * activeState.duration;
+  }
+  function renderScrubPosition(t){
+    var pct = activeState && activeState.duration > 0 ? Math.max(0, Math.min(100, (t / activeState.duration) * 100)) : 0;
+    progressFill.style.width = pct + '%';
+    progressMarker.style.left = pct + '%';
+    elapsedLabel.textContent = formatTime(t);
+  }
+  progressTrack.addEventListener('pointerdown', function(e){
+    if (!activeState || !activeState.duration) return;
+    scrubbing = true;
+    try { progressTrack.setPointerCapture(e.pointerId); } catch (err) {}
+    renderScrubPosition(scrubTargetFromEvent(e));
+  });
+  progressTrack.addEventListener('pointermove', function(e){
+    if (scrubbing) renderScrubPosition(scrubTargetFromEvent(e));
+  });
+  progressTrack.addEventListener('pointerup', function(e){
+    if (!scrubbing) return;
+    scrubbing = false;
+    sendCommand({ action: 'seek', value: scrubTargetFromEvent(e) });
+  });
+
+  // --- Volume: local-only tracking (the device never reports its own
+  // volume back), same fire-and-forget model this row always used.
+  var volumeLevel = 100;
+  var muted = false;
+  var volumeBeforeMute = 100;
+
+  function renderVolumeLevel(){
+    volumeLevelPill.textContent = volumeLevel;
+  }
+  function pushVolume(){
+    renderVolumeLevel();
+    sendCommand({ action: 'setVolume', value: volumeLevel / 100 });
+  }
+  volUpBtn.addEventListener('click', function(){
+    if (muted) { muted = false; volumeIconNormal.style.display = ''; volumeIconMuted.style.display = 'none'; }
+    volumeLevel = Math.min(100, volumeLevel + 5);
+    pushVolume();
+  });
+  volDownBtn.addEventListener('click', function(){
+    volumeLevel = Math.max(0, volumeLevel - 5);
+    pushVolume();
+  });
+  muteBtn.addEventListener('click', function(){
+    if (muted) {
+      muted = false;
+      volumeLevel = volumeBeforeMute;
+    } else {
+      volumeBeforeMute = volumeLevel;
+      muted = true;
+      volumeLevel = 0;
+    }
+    volumeIconNormal.style.display = muted ? 'none' : '';
+    volumeIconMuted.style.display = muted ? '' : 'none';
+    pushVolume();
+  });
+})();
+</script>
+</body>
+</html>
