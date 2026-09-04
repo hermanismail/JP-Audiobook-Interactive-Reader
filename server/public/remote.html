@@ -88,6 +88,12 @@
 
   #controlScreen, #noDeviceScreen { display:none; width:100%; flex-direction:column; align-items:center; }
   #controlScreen.show, #noDeviceScreen.show { display:flex; }
+  /* Inert by default (portrait mobile and the desktop-capped view) - their
+     children behave exactly as if these wrappers didn't exist, direct
+     flex children of #controlScreen in the same order as before. Only
+     the mobile-landscape media query at the end of this stylesheet turns
+     them into real flex columns, splitting the screen 1:2. */
+  #landscapeColLeft, #landscapeColRight { display:contents; }
 
   .iconBtn {
     box-sizing:border-box; border-radius:50%; border:1px solid var(--border);
@@ -224,8 +230,13 @@
   /* Mobile-only bumps (real phone/tablet widths, below the 786px cap) -
      bigger text and touch targets than the capped-desktop view needs,
      since a desktop viewer is closer to their screen than someone
-     actually holding this as a remote. */
-  @media (max-width:785.98px) {
+     actually holding this as a remote. Also applied whenever a touch
+     device is in landscape, regardless of its actual width - a rotated
+     phone is very often wider than 786px (e.g. 844px), which would
+     otherwise wrongly read as "desktop" and skip these bumps entirely.
+     The mobile-landscape media query further down handles the column
+     restructuring on top of these same sizes. */
+  @media (max-width:785.98px), (pointer:coarse) and (orientation:landscape) {
     /* Cover -10% (80u -> 72u). */
     #coverWrap { width:calc(72 * var(--u)); height:calc(72 * var(--u)); }
 
@@ -334,12 +345,62 @@
     text-decoration:none; font-size:calc(1.8 * var(--u)); font-weight:600; text-transform:uppercase;
   }
   #noDeviceHomeBtn svg { width:calc(2 * var(--u)); height:calc(2 * var(--u)); }
+
+  /* Mobile landscape: a 1:2 two-column split instead of the single
+     stacked column - book identity on the left, everything else on the
+     right. Placed last so it wins over both the portrait-mobile rules
+     above (same selectors, later source order) and the desktop-cap
+     bezel rule (a rotated phone is very often wider than 786px, e.g.
+     844px, which would otherwise wrongly trigger that rule too).
+
+     --u is redefined here against 1vh instead of 1vw: in landscape the
+     viewport's WIDTH is the large dimension and HEIGHT is the small one
+     (the reverse of portrait), and it's the height that stays roughly
+     constant across the same device's own rotation (a 390-wide portrait
+     phone becomes roughly 390 tall in landscape). Keying --u off height
+     here is what makes every already-written calc(N * var(--u)) rule -
+     nothing below needs to duplicate them - come out the same physical
+     size as it does in portrait, per "maintain similarity to vertical
+     screen", instead of ballooning to the (much larger) frozen desktop-
+     cap value that un-redefined --u would hit at a typical landscape
+     width. */
+  @media (pointer:coarse) and (orientation:landscape) {
+    :root { --u: min(1vh, 7.86px); }
+
+    body { padding-top:0; }
+    #remoteFrame { width:100%; border:none; border-radius:0; }
+
+    #controlScreen { flex-direction:row; align-items:stretch; justify-content:center; gap:calc(4 * var(--u)); }
+    #landscapeColLeft {
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      flex:1; min-width:0;
+    }
+    #landscapeColRight {
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      flex:2; min-width:0;
+    }
+    /* Clamped to the column's own (narrower) width instead of the fixed
+       80u the single-column layouts use - at a typical phone's landscape
+       proportions, column 1 (a third of the full width) is narrower than
+       80u would be, so the fixed value would overflow it otherwise. */
+    #coverWrap { width:min(calc(80 * var(--u)), 100%); height:auto; aspect-ratio:1/1; }
+  }
 </style>
 </head>
 <body>
 
 <div id="remoteFrame">
 <div id="controlScreen">
+  <div id="landscapeColLeft">
+  <div id="coverWrap">
+    <img id="coverImg" style="display:none;">
+    <div id="coverPlaceholder">&#9834;</div>
+  </div>
+  <div id="titleText"></div>
+  <div id="authorText"></div>
+  </div>
+
+  <div id="landscapeColRight">
   <div id="topIcons">
     <button id="allBooksBtn" class="iconBtn" aria-label="All books">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
@@ -358,13 +419,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
     </button>
   </div>
-
-  <div id="coverWrap">
-    <img id="coverImg" style="display:none;">
-    <div id="coverPlaceholder">&#9834;</div>
-  </div>
-  <div id="titleText"></div>
-  <div id="authorText"></div>
 
   <div id="pillRow">
     <div id="chapterPill" class="pill">
@@ -423,6 +477,7 @@
     <button id="playingOnPill" class="pill">
       <span class="pillIconRow" id="playingOnLabel"></span>
     </button>
+  </div>
   </div>
 </div>
 

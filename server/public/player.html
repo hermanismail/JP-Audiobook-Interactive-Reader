@@ -121,7 +121,14 @@
   }
 
   #zenImageWrap { display:none; align-items:center; flex-shrink:0; }
-  #zenImage { height:100%; width:100%; object-fit:contain; border-radius:8px; }
+  /* cover (not contain) - fills the entire column box, center-cropping
+     whichever axis overflows, rather than letterboxing empty space when
+     the image's own aspect ratio doesn't match the column's. The column
+     box itself (#zenImageWrap) still gets its fixed pixel size from JS
+     (recalcZenColumns()) regardless of this choice, so a differently-
+     shaped image rotating in still can't resize the column - it just
+     crops differently within the same unchanged box. */
+  #zenImage { height:100%; width:100%; object-fit:cover; border-radius:8px; }
   /* Rectangular feather, shared with the zen side image and the meta
      row's cover art (both #coverArt and its no-cover placeholder) - same
      two-linear-gradient intersect/source-in mask used everywhere else in
