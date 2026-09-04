@@ -135,7 +135,8 @@
   #coverPlaceholder { display:flex; align-items:center; justify-content:center; color:var(--placeholder-ink); font-size:calc(10 * var(--u)); }
   /* Swapped in for the cover/title/author block (all hidden, see the
      subtitle-mode rules below) whenever the active device's subtitleMode
-     is 'remote' - see renderNowPlaying() and fitCoverSubtitleText(). A
+     is 'remote-animated' or 'remote-static' - see renderNowPlaying() and
+     fitCoverSubtitleText(). A
      sibling of #coverWrap, not nested inside it - it needs to span the
      full content column width (see width:100% below), not just the
      square cover box, per explicit request ("fill the available screen
@@ -701,9 +702,9 @@
   });
 
   // Relays the click straight through - the active device owns the actual
-  // four-mode cycle (off/animated/static/remote) and broadcasts the
-  // result back down via the next `state` message, same pattern as
-  // toggleZen above. No .active/highlighted state here either.
+  // five-mode cycle (off/animated/static/remote-animated/remote-static)
+  // and broadcasts the result back down via the next `state` message,
+  // same pattern as toggleZen above. No .active/highlighted state here either.
   subtitleToggleBtn.addEventListener('click', function(){
     sendCommand({ action: 'toggleSubtitle' });
   });
@@ -866,17 +867,19 @@
     coverSubtitleText.style.fontSize = COVER_SUBTITLE_FONT_SIZE + 'px';
   }
 
-  // Word-by-word fade, same formula as player.html's own updateSubtitleWordFade()
-  // (COMPLETE_AT_FRACTION-based continuous opacity ramp across the cue's own
-  // start/end) - driven off activeState.position rather than a local clock,
-  // so it updates in the same ~1/sec steps the WS state channel already
-  // ticks at (immediately on a cue change, since reportState() forces those)
-  // rather than a smooth 60fps animation. Chunkier than the player's own
-  // frame-by-frame version, but still visibly fades in rather than the cue
-  // just popping in all at once.
+  // Word-by-word fade ("remote-animated"), same formula as player.html's
+  // own updateSubtitleWordFade() (COMPLETE_AT_FRACTION-based continuous
+  // opacity ramp across the cue's own start/end) - driven off
+  // activeState.position rather than a local clock, so it updates in the
+  // same ~1/sec steps the WS state channel already ticks at (immediately
+  // on a cue change, since reportState() forces those) rather than a
+  // smooth 60fps animation. Chunkier than the player's own frame-by-frame
+  // version, but still visibly fades in rather than the cue just popping
+  // in all at once. "remote-static" skips this and shows every word at
+  // full opacity immediately, mirroring player.html's own "static" mode.
   var COVER_SUBTITLE_COMPLETE_AT_FRACTION = 0.95;
   var coverSubtitleWordSpans = [];
-  function updateCoverSubtitleText(text, cueStart, cueEnd, position){
+  function updateCoverSubtitleText(text, cueStart, cueEnd, position, isStatic){
     if (text !== lastCoverSubtitleText) {
       lastCoverSubtitleText = text;
       coverSubtitleTextInner.innerHTML = '';
@@ -890,7 +893,9 @@
         if (i < words.length - 1) coverSubtitleTextInner.appendChild(document.createTextNode(' '));
       });
     }
-    if (coverSubtitleWordSpans.length && cueEnd > cueStart) {
+    if (isStatic) {
+      coverSubtitleWordSpans.forEach(function(span){ span.style.opacity = '1'; });
+    } else if (coverSubtitleWordSpans.length && cueEnd > cueStart) {
       var frac = Math.max(0, Math.min(1, (position - cueStart) / (cueEnd - cueStart)));
       var adjustedFrac = Math.min(1, frac / COVER_SUBTITLE_COMPLETE_AT_FRACTION);
       var n = coverSubtitleWordSpans.length;
@@ -926,10 +931,10 @@
     chapterPillText.textContent = 'Chapter: ' + (activeState.chapterIndex || 0) + '/' + (activeState.totalChapters || 0) +
       ' Part: ' + (activeState.partIndex || 0) + '/' + (activeState.totalParts || 0);
 
-    var subtitleOnRemote = activeState.subtitleMode === 'remote';
+    var subtitleOnRemote = activeState.subtitleMode === 'remote-animated' || activeState.subtitleMode === 'remote-static';
     landscapeColLeft.classList.toggle('subtitle-mode', subtitleOnRemote);
     if (subtitleOnRemote) {
-      updateCoverSubtitleText(activeState.subtitleText || '', activeState.subtitleCueStart || 0, activeState.subtitleCueEnd || 0, activeState.position || 0);
+      updateCoverSubtitleText(activeState.subtitleText || '', activeState.subtitleCueStart || 0, activeState.subtitleCueEnd || 0, activeState.position || 0, activeState.subtitleMode === 'remote-static');
     } else {
       coverImg.src = '/api/books/' + activeState.bookId + '/chapters/' + activeState.chapterBase + '/cover';
       coverImg.style.display = 'block';

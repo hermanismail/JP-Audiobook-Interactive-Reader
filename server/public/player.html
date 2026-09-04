@@ -493,8 +493,15 @@
   // Flat height reserved at the bottom of the reading area for the
   // subtitle overlay whenever it's toggled on - one fixed number rather
   // than measuring the actual current cue, so the vertical text/zen image
-  // don't resize every time a cue appears or disappears.
-  var SUBTITLE_RESERVED_H = 44;
+  // don't resize every time a cue appears or disappears. Sized for ~2
+  // wrapped lines at SUBTITLE_FONT_SIZE (the overlay wraps now instead of
+  // a single fitted line - see #subtitleOverlay's CSS) plus its own
+  // padding, not just 1 - real iPad zen-mode testing showed a cue that
+  // wrapped to 2 lines getting its bottom line pushed past the reserved
+  // gap and off-screen at the old (1-line) value. splitCueBySentence()
+  // below also shortens most cues so they need fewer lines in the first
+  // place, but doesn't guarantee a single sentence never wraps twice.
+  var SUBTITLE_RESERVED_H = 84;
 
   var zenActive = false;
   var zenDesktopActive = false;
@@ -931,31 +938,34 @@
   // two reveal styles feel like the same design language, per explicit
   // request.
   //
-  // #subtitleToggleBtn ("C") cycles four global (localStorage, not
+  // #subtitleToggleBtn ("C") cycles five global (localStorage, not
   // per-book - same pattern as textPreset/theme) modes on every click,
   // same as presetToggleBtn (see setTextPreset() above) - a plain click
   // toggle with NO active/highlighted visual state of its own, the
   // button glyph never changes:
-  //   off -> animated -> static -> remote -> off -> ...
-  // "animated"/"static" show the overlay locally, exactly like before
-  // except static skips the per-word fade and just shows the whole cue
-  // at once. "remote" shows nothing on THIS device at all - cue text is
-  // broadcast over the existing WS state channel instead (see
-  // reportState() below) for remote.html to render in the image-swap
-  // area, per its own "C" toggle.
-  var SUBTITLE_MODES = ['off', 'animated', 'static', 'remote'];
+  //   off -> animated -> static -> remote-animated -> remote-static -> off -> ...
+  // "animated"/"static" show the overlay locally, exactly like before -
+  // static just skips the per-word fade and shows the whole cue at once.
+  // "remote-animated"/"remote-static" show nothing on THIS device at all -
+  // cue text (and which of the two remote styles to use) is broadcast
+  // over the existing WS state channel instead (see reportState() below)
+  // for remote.html to render in the image-swap area, per its own "C"
+  // toggle - same fade-vs-static distinction as the local modes, just
+  // rendered on the other device.
+  var SUBTITLE_MODES = ['off', 'animated', 'static', 'remote-animated', 'remote-static'];
   var subtitleMode = 'off';
   try {
     var storedSubtitleMode = localStorage.getItem('subtitleMode');
     if (SUBTITLE_MODES.indexOf(storedSubtitleMode) >= 0) subtitleMode = storedSubtitleMode;
   } catch(e){}
   function subtitlesShowOnPlayer(){ return subtitleMode === 'animated' || subtitleMode === 'static'; }
+  function subtitlesShowOnRemote(){ return subtitleMode === 'remote-animated' || subtitleMode === 'remote-static'; }
 
   var subtitleCues = []; // [{start,end,text}], seconds
   var subtitleLoadToken = 0; // guards a slow-arriving fetch from a chapter already left
   var subtitleCueIndex = -1;
   var subtitleWordSpans = [];
-  var currentSubtitleText = ''; // current cue's text regardless of mode - what "remote" mode broadcasts
+  var currentSubtitleText = ''; // current cue's text regardless of mode - what the "remote-*" modes broadcast
   var currentSubtitleCueStart = 0, currentSubtitleCueEnd = 0; // sent alongside currentSubtitleText so remote.html can drive its own word-fade off the same cue timing
   var SUBTITLE_FONT_SIZE = 24; // flat size (px) - see showSubtitleCue()
 
@@ -965,9 +975,62 @@
     return (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 1000;
   }
 
+  // A single .srt block's own text often bundles several sentences under
+  // one timestamp pair (that's how the generator writes them, not a
+  // per-sentence granularity) - splitting here means the overlay only
+  // ever shows one sentence at a time, moving to the next only once the
+  // current one's own (proportional) share of the block's timespan has
+  // passed, per explicit request, rather than dumping the whole block on
+  // screen at once (which is also most of what was overflowing the
+  // reserved space in zen mode - see SUBTITLE_RESERVED_H). Split point is
+  // "a period" (each match greedily eats a run of non-period characters
+  // plus the period(s) that end it, so "..." stays one piece) -
+  // deliberately simple as asked, so this will over-split on
+  // abbreviations like "Mr. Smith", a known tradeoff of naive
+  // period-splitting rather than a real sentence tokenizer. Written as an
+  // exec() loop rather than String.split() with a lookbehind
+  // (`/(?<=\.)\s+/`) specifically for iOS Safari - lookbehind assertions
+  // only landed in Safari 16.4 (2023), and this overlay's whole reason to
+  // exist right now is iPad zen mode.
+  function splitIntoSentences(text){
+    var sentences = [];
+    var re = /[^.]*\.+/g;
+    var m, lastIndex = 0;
+    while ((m = re.exec(text))) {
+      var s = m[0].trim();
+      if (s) sentences.push(s);
+      lastIndex = re.lastIndex;
+    }
+    var rest = text.slice(lastIndex).trim();
+    if (rest) sentences.push(rest);
+    return sentences.length ? sentences : [text];
+  }
+
+  // Each sentence's slice of the block's [start,end) window is
+  // proportional to its own character length (a longer sentence gets
+  // more display time), with the last sentence absorbing any rounding
+  // remainder so the sum always lands exactly on the block's real end.
+  function splitCueBySentence(cue){
+    var sentences = splitIntoSentences(cue.text);
+    if (sentences.length <= 1) return [cue];
+    var totalLen = sentences.reduce(function(sum, s){ return sum + s.length; }, 0);
+    var span = cue.end - cue.start;
+    var subCues = [];
+    var t = cue.start;
+    sentences.forEach(function(s, i){
+      var isLast = i === sentences.length - 1;
+      var dur = isLast ? (cue.end - t) : span * (totalLen > 0 ? s.length / totalLen : 1 / sentences.length);
+      subCues.push({ start: t, end: t + dur, text: s });
+      t += dur;
+    });
+    return subCues;
+  }
+
   // Minimal SRT parser: index line, "start --> end" (HH:MM:SS,mmm), one
   // or more text lines, blank-line separated. Multi-line cues are joined
-  // with a space - the overlay wraps to as many lines as it needs.
+  // with a space, then run through splitCueBySentence() above - the
+  // overlay wraps to as many lines as it needs for whichever sentence is
+  // current.
   function parseSrt(text){
     var cues = [];
     var blocks = text.replace(/\r/g, '').split(/\n\n+/);
@@ -980,7 +1043,8 @@
       var parts = timeLine.split('-->');
       var cueText = lines.slice(timeLineIdx + 1).join(' ').trim();
       if (!cueText) continue;
-      cues.push({ start: parseSrtTime(parts[0]), end: parseSrtTime(parts[1]), text: cueText });
+      var block = { start: parseSrtTime(parts[0]), end: parseSrtTime(parts[1]), text: cueText };
+      cues = cues.concat(splitCueBySentence(block));
     }
     return cues;
   }
@@ -1103,8 +1167,9 @@
       currentSubtitleCueStart = cue ? cue.start : 0;
       currentSubtitleCueEnd = cue ? cue.end : 0;
       // Only "animated"/"static" touch the local overlay's DOM at all -
-      // "remote" mode deliberately shows nothing on this device, just
-      // updates currentSubtitleText above for reportState() to send on.
+      // the two "remote-*" modes deliberately show nothing on this
+      // device, just update currentSubtitleText above for reportState()
+      // to send on.
       if (subtitlesShowOnPlayer()) {
         if (cue) showSubtitleCue(cue); else hideSubtitleOverlay();
       }
@@ -1115,17 +1180,18 @@
 
   // Shared by the local "C" button AND a remote `toggleSubtitle` command
   // (remote.html's own new "C" button - same mechanism as toggleForceZen()
-  // above) - advances the shared four-mode cycle one step either way.
+  // above) - advances the shared five-mode cycle one step either way.
   function advanceSubtitleMode(){
     var i = SUBTITLE_MODES.indexOf(subtitleMode);
     subtitleMode = SUBTITLE_MODES[(i + 1) % SUBTITLE_MODES.length];
     try { localStorage.setItem('subtitleMode', subtitleMode); } catch(e){}
 
     // Mode change affects how much bottom space #frame reserves on THIS
-    // device (only animated/static reserve any - remote and off don't) -
-    // re-derive it (zen's own column math, or the plain non-zen padding)
-    // and re-fit the currently shown page against the new space
-    // immediately, rather than waiting for the next resize/page turn.
+    // device (only animated/static reserve any - the two remote-* modes
+    // and off don't) - re-derive it (zen's own column math, or the plain
+    // non-zen padding) and re-fit the currently shown page against the
+    // new space immediately, rather than waiting for the next
+    // resize/page turn.
     if (zenActive) recalcZenColumns(); else applyNonZenSubtitlePadding();
     if (shown && idx >= 0) showPage(idx);
 
@@ -1749,12 +1815,13 @@
       chapterIndex: chapterNumber(chapterBase) || 0, totalChapters: chapterTotalCount(),
       partIndex: idx + 1, totalParts: chunks.length,
       // remote.html only actually acts on these while subtitleMode is
-      // 'remote' (see its own "C" toggle) - sent unconditionally here
-      // since it's cheap and keeps the two sides in sync regardless of
-      // which one changes mode first. Cue start/end let remote.html drive
-      // its own word-by-word fade off the same timing as player.html's
-      // own "animated" mode (see updateSubtitleWordFade()), rather than
-      // just snapping the whole cue in at once.
+      // 'remote-animated'/'remote-static' (see its own "C" toggle) - sent
+      // unconditionally here since it's cheap and keeps the two sides in
+      // sync regardless of which one changes mode first. Cue start/end
+      // let remote.html drive its own word-by-word fade (remote-animated
+      // only - remote-static just shows the whole cue like player.html's
+      // own "static" mode) off the same timing as player.html's own
+      // "animated" mode (see updateSubtitleWordFade()).
       subtitleMode: subtitleMode, subtitleText: currentSubtitleText,
       subtitleCueStart: currentSubtitleCueStart, subtitleCueEnd: currentSubtitleCueEnd
     });
