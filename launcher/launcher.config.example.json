@@ -1,0 +1,9 @@
+{
+  "_comment": "Optional. Copy to launcher.config.json (gitignored) only if you need to override what the launcher discovers on its own. Everything below is auto-detected at runtime: port and book count from ../server/config.json, tunnel name and hostname from ~/.cloudflared/config.yml, and node/cloudflared from PATH. Delete any key you don't want to override.",
+
+  "port": 3939,
+  "tunnel_name": "your-tunnel-name",
+  "hostname": "your-tunnel-hostname.example.com",
+  "node": "C:\\Program Files\\nodejs\\node.exe",
+  "cloudflared": "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe"
+}

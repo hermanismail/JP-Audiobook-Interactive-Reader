@@ -1,0 +1,21 @@
+# Launcher venv (customtkinter lives here - see README)
+.venv/
+__pycache__/
+
+# Runtime state: PIDs of the server/tunnel this machine left running, and
+# the captured service logs. Machine-specific and can contain local paths,
+# so never committed.
+.state.json
+logs/
+
+# Optional local overrides (paths, tunnel name, hostname). The committed
+# launcher.config.example.json is the template; the real one stays local
+# because this repo is public.
+launcher.config.json
+
+# Optional local window icon - kept out of git for the same reason the
+# Android app's icon.jpg is (see the repo README).
+icon.ico
+
+# Generated shortcut
+*.lnk
