@@ -106,6 +106,18 @@
   #frame { flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:64px 26px 26px; box-sizing:border-box; }
   #pageText { writing-mode:vertical-rl; height:100%; letter-spacing:0.06em; font-weight:500; transition:opacity 0.3s; opacity:1; color:var(--read-text-base); font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; overflow-wrap:anywhere; }
   #pageText span { transition:color 0.2s ease, opacity 0.15s linear; }
+  /* Tate-chu-yoko (縦中横): a run of half-width digits gets its own span,
+     capped at 2 characters (see buildChunkSpans() - not the old one-
+     span-per-character map), with this applied, so "17" lays out as one
+     horizontal pair rotated upright within the vertical column instead of
+     "1" then "7" stacked as two separate rows. Deliberately `all`, not
+     the more semantically-fitting `text-combine-upright: digits 2` -
+     confirmed via caniuse that the `digits` value has ZERO support in any
+     browser (an initial attempt using it silently did nothing, matching
+     exactly that). `all` combines everything in the span uniformly and
+     IS well supported, which is why the JS does the "at most 2 digits
+     per span" capping itself instead of leaving it to CSS. */
+  #pageText span.tcy { text-combine-upright: all; }
   #measure { position:absolute; visibility:hidden; top:-9999px; left:-9999px; writing-mode:vertical-rl; letter-spacing:0.06em; font-weight:500; font-family:"Yu Mincho","YuMincho","游明朝","Hiragino Mincho ProN","MS Mincho",serif; white-space:normal; overflow-wrap:anywhere; }
   #loadingOverlay { display:none; color:var(--muted); font-size:14px; text-align:center; }
 
@@ -735,6 +747,47 @@
     return { w: zenColW, h: zenRowH };
   }
 
+  // One span per character, same as before, EXCEPT a run of consecutive
+  // ASCII digits ("17", "22") gets grouped into a single span with the
+  // .tcy class (see its CSS) so it renders tate-chu-yoko instead of each
+  // digit stacked on its own row. Everything downstream (chunkLitCount,
+  // updateChunkHighlight, applyInitialSpanState) just walks chunkSpans by
+  // index and colors/fades whatever's inside each one - a digit run
+  // becomes one highlight unit, not several, which needs no changes there.
+  var TCY_GROUP_SIZE = 2; // digits combined per span - see the .tcy CSS comment on why this is done here, not via `text-combine-upright: digits 2`
+
+  function buildChunkSpans(text){
+    var spans = [];
+    var chars = Array.from(text);
+    var i = 0;
+    while (i < chars.length) {
+      if (chars[i] >= '0' && chars[i] <= '9') {
+        var j = i;
+        while (j < chars.length && chars[j] >= '0' && chars[j] <= '9') j++;
+        // Emit the run in groups of at most TCY_GROUP_SIZE digits each -
+        // "1234" becomes two combined pairs ("12", "34"), not one
+        // 4-digit span text-combine-upright:all would cram illegibly
+        // small into a single character-width cell.
+        for (var k = i; k < j; k += TCY_GROUP_SIZE) {
+          var group = chars.slice(k, Math.min(k + TCY_GROUP_SIZE, j)).join('');
+          var span = document.createElement('span');
+          span.textContent = group;
+          if (group.length > 1) span.className = 'tcy';
+          pageText.appendChild(span);
+          spans.push(span);
+        }
+        i = j;
+      } else {
+        var single = document.createElement('span');
+        single.textContent = chars[i];
+        pageText.appendChild(single);
+        spans.push(single);
+        i++;
+      }
+    }
+    return spans;
+  }
+
   function showPage(i){
     var chunk = chunks[i];
     var space = getAvailableSpace();
@@ -744,12 +797,7 @@
     pageText.style.fontSize = f + 'px';
 
     pageText.innerHTML = '';
-    chunkSpans = Array.from(chunk.text).map(function(ch){
-      var span = document.createElement('span');
-      span.textContent = ch;
-      pageText.appendChild(span);
-      return span;
-    });
+    chunkSpans = buildChunkSpans(chunk.text);
 
     pageText.style.display = 'none';
     void pageText.offsetHeight;
